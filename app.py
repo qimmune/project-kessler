@@ -12,6 +12,7 @@ import time
 import numpy as np
 import plotly.graph_objects as go
 import streamlit as st
+import streamlit.components.v1 as components
 
 from kessler.agents import run_resolution
 from kessler.assurance import Authorization, EngagementLog, Mode, cross_check
@@ -28,6 +29,17 @@ VOID, PANEL, LINE = "#060911", "#111A2E", "#22304C"
 INK, MUTED = "#E6EBF4", "#8494AD"
 AMBER, ICE, ALERT, NOMINAL = "#F2A03D", "#6FB6E8", "#FF4757", "#4FD1A5"
 LEO_VIEW_KM = 8200.0
+
+# LeoLabs' public visualizations. Both are served without authentication and
+# carry no X-Frame-Options or CSP frame-ancestors directive, so they embed
+# cleanly. Use is covered by LeoLabs' terms for sharing, which permit
+# non-commercial educational use provided credit and a link are given --
+# render_leolabs() below carries that attribution and must stay with the frame.
+LEOLABS = {
+    "LEO catalog (all tracked objects)": "https://platform.leolabs.space/visualizations/leo",
+    "Today's conjunctions": "https://platform.leolabs.space/visualizations/conjunctions/today",
+}
+LEOLABS_TERMS = "https://platform.leolabs.space/visualizations_terms_for_sharing"
 
 st.set_page_config(page_title="Project Kessler", layout="wide",
                    initial_sidebar_state="expanded")
@@ -152,7 +164,35 @@ def show_result(out, alert, plot_slot, metric_slot, r0, v0, horizon, cloud,
                f"{res['new_miss_km']:.2f} km. No human in the loop.")
 
 
+def render_leolabs(view: str, height: int = 560):
+    """Embed LeoLabs' live radar-tracked view alongside our own screen.
+
+    This is an independent source: LeoLabs tracks with a phased-array radar
+    network, while everything else in this app is propagated from public TLEs.
+    Showing both side by side is the point -- one is what we compute, the other
+    is what a commercial tracking provider observes.
+    """
+    st.divider()
+    st.markdown("<div class='kessler-hd'>LeoLabs — independent radar-tracked view</div>",
+                unsafe_allow_html=True)
+    st.link_button(f"Open LeoLabs live view in a new tab  ↗", LEOLABS[view],
+                   use_container_width=False)
+    components.iframe(LEOLABS[view], height=height, scrolling=False)
+    st.caption(
+        f"Visualization © LeoLabs, Inc. Embedded under LeoLabs' "
+        f"[terms for sharing]({LEOLABS_TERMS}) for non-commercial educational use — "
+        f"[leolabs.space](https://leolabs.space). LeoLabs is the production-grade "
+        f"ingest path for this system; the screening engine here runs on the public "
+        f"CelesTrak TLE catalog.")
+    st.caption(
+        ":grey[If the embedded 3D view shows a render error, use the link above — "
+        "some browsers refuse WebGL inside a cross-origin frame. The link is the "
+        "safer path mid-demo.]")
+
+
 def render_engagement_log():
+    if st.session_state.get("show_leo"):
+        render_leolabs(st.session_state.get("leo_view", list(LEOLABS)[0]))
     elog = st.session_state.get("log")
     if not elog or not len(elog):
         return
@@ -179,10 +219,18 @@ op_mode = st.sidebar.radio(
          "AUTONOMOUS self-authorizes and records that it did. Neither uplinks "
          "anything — this build stops at a log.")
 st.sidebar.divider()
+show_leo = st.sidebar.checkbox("Show LeoLabs live view", value=False,
+                               help="Embeds LeoLabs' public radar-tracked visualization "
+                                    "beside our own screen. Adds a few seconds of load.")
+leo_view = st.sidebar.selectbox("LeoLabs view", list(LEOLABS), index=0,
+                                disabled=not show_leo)
+st.sidebar.divider()
 
 c = Constraints()
 ts = timescale()
 t0 = ts.now()
+st.session_state["show_leo"] = show_leo
+st.session_state["leo_view"] = leo_view
 if "log" not in st.session_state:
     st.session_state["log"] = EngagementLog()
 elog: EngagementLog = st.session_state["log"]

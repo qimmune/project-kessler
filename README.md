@@ -183,6 +183,36 @@ before the crossing-geometry factor. The physics is doing the work.
 
 ---
 
+## LeoLabs
+
+The dashboard can embed LeoLabs' public LEO visualization beside our own screen —
+one is what we compute from public TLEs, the other is what a commercial
+phased-array radar network actually observes. Toggle it in the sidebar.
+
+Two views are wired: the full LEO catalog (~27,600 tracked objects) and today's
+conjunctions.
+
+**Licensing.** LeoLabs' [terms for sharing](https://platform.leolabs.space/visualizations_terms_for_sharing)
+permit use for *non-commercial educational, academic, or research purposes*,
+which a hackathon build is, provided credit is given with a link to
+https://leolabs.space and their marks are not removed. `render_leolabs()` in
+`app.py` carries that attribution — **keep it attached to the frame.** Their
+terms do not cover commercial or promotional use, so if this becomes a product,
+the embed comes out until there is an agreement.
+
+**Access.** Both visualization URLs are public — no login, no API key. They also
+send no `X-Frame-Options` and no CSP `frame-ancestors`, so they embed cleanly.
+The authenticated LeoLabs *API* (state vectors, conjunction data, tasking) is a
+different matter and needs a key from `accounts@leolabs.space`; nothing here
+depends on it.
+
+**Caveat.** The 3D view failed to render inside a cross-origin iframe in a
+headless test browser while working fine standalone. The sidebar panel therefore
+offers a direct link as well as the frame. Check the embed on your own machine
+before relying on it in a demo.
+
+---
+
 ## Honest scope
 
 **Real:** live TLE catalog; SGP4 including the drag term; conjunction geometry,
