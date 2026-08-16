@@ -4,8 +4,19 @@ Everything a new person — or a new Claude — needs to continue this work.
 
 `CLAUDE.md` sits next to this file and is loaded automatically by Claude Code
 when the repo is opened. **That is the transfer mechanism**: clone the repo,
-open it with Claude, and the context comes with it. This document is the
-narrative version for humans.
+open it with Claude, and the context comes with it.
+
+Three documents, in the order a newcomer should read them:
+
+| File | What it carries |
+|---|---|
+| `CLAUDE.md` | Auto-loaded by Claude. Non-obvious engineering decisions, how this team works, pitch claims the code must keep true, event and bounty context. |
+| `HANDOFF.md` | This file. State of play, bugs worth knowing about, open questions. |
+| `docs/DECISIONS.md` | Full chronology — the deck's four rewrites, the architecture that was proposed and partly declined, why LeoLabs was reassessed, how the debris-count problem was resolved, what was abandoned. |
+
+Everything the previous sessions established is in those three files. There is
+no separate chat log to move — the reasoning that mattered has been written
+down, and the reasoning that did not is not worth carrying.
 
 ---
 

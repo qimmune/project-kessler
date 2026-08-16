@@ -1,8 +1,57 @@
 # Project Kessler — context for Claude
 
-Autonomous orbital traffic control, built for the NVIDIA Spark Hack (Seattle).
-Read this before changing anything; several decisions here are load-bearing and
-look arbitrary from the outside.
+Autonomous orbital traffic control, built for the **NVIDIA Spark Hack, Seattle**
+(track: Do). Read this before changing anything; several decisions here are
+load-bearing and look arbitrary from the outside.
+
+`docs/DECISIONS.md` has the full chronology — what was tried, what was rejected,
+and why. `HANDOFF.md` is the human-facing state of play. Read both if you are
+picking this up cold.
+
+## Working with this team
+
+Observed preferences, stated plainly because getting these wrong wastes their time:
+
+- **Ship, then refine.** They would rather see a working artifact and tweak it
+  than watch a long verification pass. An earlier session spent a lot of effort
+  screenshotting slides through a headless browser and got told, correctly,
+  that it was burning compute for little progress. Prefer deterministic checks
+  over visual ones, and hand over the file.
+- **Do not be over-cautious.** The LeoLabs licensing question was initially
+  called a blocker; it was not, and the pushback ("this is non-commercial, it's a
+  hackathon project lol") was right. Raise a real concern once, in a sentence,
+  then proceed.
+- **They check the work and they are right often.** The regression where the
+  agent silently disappeared from the demo path was caught by them, not by the
+  tests. Take challenges seriously and go verify rather than reassure.
+- **Honesty is wanted, and so is a pitch that lands.** When a claim looked
+  shaky — the 140M debris figure — the answer was neither to fudge it nor to
+  drop it, but to find the framing that is both true and stronger. Aim there.
+- **Direct and informal.** Short answers, no ceremony. Lead with the answer.
+
+## Deliverables that live outside this repo
+
+- `Project-Kessler.pptx` — 5-slide deck, animated GIF on the title slide,
+  minimum 18 pt type. On Cameron's Desktop.
+- `kessler-orbit.gif` — 760 px, 80 frames, seamless 4.8 s loop. Loops perfectly
+  because every object's period is an integer harmonic of the loop length;
+  naive regeneration will show a seam.
+- `SUBMISSION.md` (in repo) — the hackathon form, drafted, with `[YOU]` markers
+  on the fields only the team can answer.
+
+## Pitch claims the code must keep true
+
+| Claim | Status |
+|---|---|
+| 12-hour manual bottleneck → **4-second** autonomous loop | Cameron's framing; used verbatim on slide 5 |
+| 128 GB unified memory, zero PCIe copies | Now *measured* by `accel.py`, not asserted |
+| ~99M states across a 5-option trade space | Real, printed every run |
+| 0.412 km → 2.48 km for 0.189 m/s | The seeded demo encounter |
+| 15,275 satellites + 2,635 tracked debris | Real, from CelesTrak |
+| ~140M fragments | True only as *">1 mm, 99.97% untracked"* — never render them as tracked |
+
+**Open decision:** slide 5 says `requires_human_ack: false`; the UI now offers a
+human five costed options. Both modes work. Pick one and re-cut the slide.
 
 ## What it does
 
@@ -113,6 +162,18 @@ run_demo.py       CLI, exercises the original two-agent loop
 - Every `st.plotly_chart` needs an explicit `key=` — Streamlit derives ids from
   call parameters and identical charts collide.
 - Run `./scripts/test.sh` before pushing.
+
+## Event and submission context
+
+- Hackathon: NVIDIA Spark Hack, Seattle. Track **Do** (agentic). GB10 hardware
+  is an Acer Veriton GN100.
+- Two bounties are in play: **Nemotron Lightning** (best Nemotron integration)
+  and **NemoClaw / OpenShell** (agent deployed on the NemoClaw stack with its
+  sandbox and policy guardrails, Nemotron running locally).
+- Both are built and stub-tested. **Neither box should be ticked until each has
+  run against a live endpoint on the box.** Ticking early would not survive the
+  code review judges do.
+- The repo must stay **public** — the submission form requires it.
 
 ## Where it runs
 
