@@ -12,7 +12,7 @@ import numpy as np
 import plotly.graph_objects as go
 import streamlit as st
 
-from kessler.agents import run_resolution
+from kessler.agents import recommend_option, run_resolution
 from kessler.assurance import EngagementLog, Mode, cross_check
 from kessler.bus import Bus, Event
 from kessler.catalog import classify, load_demo_catalog
@@ -20,6 +20,7 @@ from kessler.environment import TOTAL_OVER_1MM, sample_environment
 from kessler.mission import (Constraints, MissionState, altitude_shortlist, find_tca,
                              requires_action, synthesize_threat)
 from kessler.monitor import select_fleet, sweep_fleet
+from kessler.options import solve_options
 from kessler.physics import (R_EARTH, apply_burn, elements, propagate,
                              teme_positions_many, teme_state, timescale)
 
@@ -30,7 +31,7 @@ LEO_VIEW_KM = 8200.0
 # Bumped whenever the shape of st.session_state["done"] changes. Streamlit keeps
 # session state across hot-reloads, so without this a dict written by an older
 # build survives into new code and blows up on a key that did not exist yet.
-STATE_SCHEMA = 2
+STATE_SCHEMA = 3
 EARTH_TEX = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                          "data", "earth_720x360.npy")
 
@@ -357,83 +358,161 @@ if engage:
     state = MissionState(hero.name, r0, v0, tname, tr, tv, t0,
                          nominal_alt_km=(el["perigee_alt_km"] + el["apogee_alt_km"]) / 2,
                          constraints=c)
-    out = run_resolution(state, altitude_shortlist(cat.objects, el, 50.0), alert, bus)
+
+    bus.emit("status", "Generating the avoidance trade space — five strategies, "
+                       "each flown and re-screened against the catalogue")
+    trade = solve_options(state, cat.objects, enc["tca_offset_s"])
+    bus.emit("status", f"{trade['scenarios']} scenarios × {trade['passes']} passes = "
+                       f"{trade['states_evaluated']:,} states, "
+                       f"{trade['tensor_gb']:.2f} GB tensor, {trade['elapsed_s']}s "
+                       f"on {trade['backend']}")
+    n_ok = sum(1 for o in trade["options"] if o.feasible)
+    bus.emit("status", f"{n_ok} of {trade['scenarios']} options satisfy every constraint")
+    rec = recommend_option(trade["options"], alert, state, bus)
 
     st.session_state["done"] = dict(
-        schema=STATE_SCHEMA, env_n=env_n,
-        events=events, out=out, alert=alert, cloud=cloud, pre=pre, thr=thr,
+        schema=STATE_SCHEMA, env_n=env_n, trade=trade, rec=rec, state=state,
+        events=events, alert=alert, cloud=cloud, pre=pre, thr=thr,
         tca_pt=r_at[:, -1], r0=r0, v0=v0, tr=tr, tv=tv, horizon=horizon,
         hero=hero.name, tname=tname, gast=float(t0.gast), cc=cc.residual_km,
         watch=len(res.watching), swept=res.catalog_size, states=res.states,
         sweep_s=res.elapsed_s, fleet_n=len(fleet), elapsed=time.time() - t_start,
-        supervised=supervised, authorized=not supervised)
+        supervised=supervised, authorized=False, chosen=None)
 
 d = st.session_state["done"]
-out, alert = d["out"], d["alert"]
+alert, trade, rec = d["alert"], d["trade"], d["rec"]
+options = trade["options"]
 log_slot.markdown(log_html(d["events"], set(TAG)), unsafe_allow_html=True)
 
-if not out["approved"]:
+feasible = [o for o in options if o.feasible]
+if not feasible:
     plot_slot.plotly_chart(globe(d["cloud"], [(d["pre"], ICE, d["hero"], 5),
                                               (d["thr"], ALERT, d["tname"], 4)],
                                  gast=d["gast"], env_n=d.get("env_n", env_n)),
                            use_container_width=True, key="globe_nofix")
-    st.error("No safe maneuver inside the constraint set — escalated to a human operator.")
+    st.error("No option in the trade space satisfies every constraint — "
+             "escalated to a human operator.")
     st.stop()
 
-p, r = out["proposal"], out["result"]
-_, rb, vb = propagate(d["r0"], d["v0"], p["burn_offset_s"], dt_s=2.0)
-dv = np.array(p["direction_ric"], float)
-v_post = apply_burn(rb[:, -1], vb[:, -1], dv / np.linalg.norm(dv) * p["delta_v_mps"])
-_, post, _ = propagate(rb[:, -1], v_post, d["horizon"] - p["burn_offset_s"], dt_s=15.0)
 
-if d.get("supervised") and not d.get("authorized"):
-    plot_slot.plotly_chart(globe(d["cloud"], [(d["pre"], ICE, d["hero"], 5),
-                                              (d["thr"], ALERT, d["tname"], 4)],
-                                 [(d["tca_pt"], ALERT, "Impact point")], gast=d["gast"],
-                                 env_n=d.get("env_n", env_n)),
-                           use_container_width=True, key="globe_await")
-    st.warning(f"Maneuver cleared by the engine — awaiting authorization. "
-               f"{p['delta_v_mps']:.3f} m/s buys {r['new_miss_km']:.2f} km.")
-    g = st.columns(2)
-    if g[0].button("Authorize burn"):
-        st.session_state["done"]["authorized"] = True
-        st.rerun()
-    if g[1].button("Hold"):
-        st.session_state["done"] = None
-        st.rerun()
-    st.stop()
+def fly(opt):
+    """Post-burn arc and burn point for one option."""
+    _, rb, vb = propagate(d["r0"], d["v0"], opt.burn_offset_s, dt_s=2.0)
+    dv = np.array(opt.direction_ric, float)
+    v_post = apply_burn(rb[:, -1], vb[:, -1], dv / np.linalg.norm(dv) * opt.delta_v_mps)
+    _, post, _ = propagate(rb[:, -1], v_post, d["horizon"] - opt.burn_offset_s, dt_s=15.0)
+    return rb[:, -1], v_post, post
 
+
+# ---------------------------------------------------------------- compute banner
+st.markdown("<p class='kes-lab'>Trade space — every option flown and re-screened "
+            "against the catalogue</p>", unsafe_allow_html=True)
+k = st.columns(5)
+k[0].metric("Options costed", trade["scenarios"])
+k[1].metric("States evaluated", f"{trade['states_evaluated']/1e6:.0f} M")
+k[2].metric("Resident tensor", f"{trade['tensor_gb']:.2f} GB")
+k[3].metric("Compute time", f"{trade['elapsed_s']:.1f} s")
+k[4].metric("Feasible", f"{len(feasible)}/{trade['scenarios']}")
+st.caption(f"{trade['scenarios']} strategies × {trade['passes']} calibration passes, "
+           f"each re-propagated and screened against {trade['screened_objects']:,} objects "
+           f"over {trade['epochs']:,} epochs · backend {trade['backend']} · "
+           f"host→device {trade['transfer'].get('bytes', 0)/1e6:.0f} MB")
+
+# ---------------------------------------------------------------- comparison
+rows = []
+for o in options:
+    rows.append({
+        "Option": o.label,
+        "Strategy": o.strategy,
+        "Clearance (km)": round(o.miss_km, 2),
+        "Fuel (m/s)": round(o.delta_v_mps, 3),
+        "% budget": round(o.fuel_pct_of_budget, 0),
+        "Commit in (min)": round(o.burn_offset_s / 60, 1),
+        "Orbit drift (km)": round(o.altitude_drift_km, 2),
+        "New conjunctions": o.secondary_count,
+        "Verdict": "feasible" if o.feasible else "· ".join(o.failed),
+    })
+st.dataframe(rows, use_container_width=True, hide_index=True)
+
+st.markdown(f"<p class='kes-lab'>Agent recommendation — {rec.get('recommended','—')}"
+            f"</p>", unsafe_allow_html=True)
+st.info(f"**{rec.get('recommended')}** — {rec.get('rationale','')}"
+        + (f"  \n*Runner-up: {rec['runner_up']} — {rec.get('why_not','')}*"
+           if rec.get("runner_up") else ""))
+
+# ---------------------------------------------------------------- pros / cons
+st.markdown("<p class='kes-lab'>Trade-offs</p>", unsafe_allow_html=True)
+cols = st.columns(min(len(feasible), 4))
+for i, o in enumerate(feasible[:4]):
+    with cols[i]:
+        flag = " ★" if o.label == rec.get("recommended") else ""
+        st.markdown(f"**{o.label}{flag}**")
+        st.caption(o.strategy)
+        for x in o.pros:
+            st.markdown(f"<span style='color:{NOMINAL}'>+</span> "
+                        f"<span style='font-size:.82rem'>{x}</span>",
+                        unsafe_allow_html=True)
+        for x in o.cons:
+            st.markdown(f"<span style='color:{AMBER}'>−</span> "
+                        f"<span style='font-size:.82rem'>{x}</span>",
+                        unsafe_allow_html=True)
+
+# ---------------------------------------------------------------- selection
+st.markdown("<p class='kes-lab'>Flight director decision</p>", unsafe_allow_html=True)
+labels = [o.label for o in feasible]
+default = labels.index(rec["recommended"]) if rec.get("recommended") in labels else 0
+choice = st.radio("Select the maneuver to execute", labels, index=default,
+                  horizontal=True, label_visibility="collapsed")
+chosen = next(o for o in feasible if o.label == choice)
+
+r_burn, v_post, post = fly(chosen)
 plot_slot.plotly_chart(
     globe(d["cloud"],
           [(d["pre"], "#55637C", "Original path", 3), (d["thr"], ALERT, d["tname"], 4),
-           (post, NOMINAL, f"{d['hero']} — corrected", 7)],
-          [(d["tca_pt"], ALERT, "Impact point"), (rb[:, -1], AMBER, "Burn")],
+           (post, NOMINAL, f"{d['hero']} — {chosen.label}", 7)],
+          [(d["tca_pt"], ALERT, "Impact point"), (r_burn, AMBER, "Burn")],
           gast=d["gast"], env_n=d.get("env_n", env_n)),
     use_container_width=True, key="globe_final")
 
-_who = ("authorized by the operator" if d.get("supervised")
-        else "no human in the loop")
-btn_slot.success(f"COLLISION AVERTED — {d['hero']} clears {d['tname']} by "
-                 f"{r['new_miss_km']:.2f} km. {_who.capitalize()}.")
-with stat_slot:
-    m = st.columns(5)
-    m[0].metric("Objects screened", f"{d['swept']:,}")
-    m[1].metric("Miss distance", f"{r['new_miss_km']:.2f} km",
-                f"+{r['new_miss_km']-alert['miss_km']:.2f} km")
-    m[2].metric("Collision risk", f"{r['new_pc']:.0e}", "cleared", delta_color="off")
-    m[3].metric("Fuel spent", f"{p['delta_v_mps']:.3f} m/s")
-    m[4].metric("Alert to burn", f"{d['elapsed']:.1f} s")
+go_cols = st.columns([1, 1, 3])
+execute = go_cols[0].button("Execute this maneuver", type="primary")
+hold = go_cols[1].button("Hold — take none")
 
-st.markdown("<p class='kes-lab'>The encounter, seen from the satellite — "
-            "origin is the spacecraft</p>", unsafe_allow_html=True)
-st.plotly_chart(encounter(d["r0"], d["v0"], rb[:, -1], v_post, d["tr"], d["tv"],
-                          alert["tca_offset_s"], p["burn_offset_s"],
-                          alert["miss_km"], r["new_miss_km"], alert["rel_speed_kms"]),
-                use_container_width=True, key="encounter_closeup")
-st.caption(f"{d['states']/1e6:.1f}M state vectors propagated in {d['sweep_s']:.2f} s · "
-           f"{d['fleet_n']} assets screened against {d['swept']:,} objects · "
-           f"{d['watch']} approaches logged · independent propagators agree to "
-           f"{d['cc']*1000:.0f} m · uplink SIMULATED")
+if hold:
+    st.session_state["done"] = None
+    st.rerun()
+
+if execute:
+    d["chosen"] = chosen.label
+    d["authorized"] = True
+
+if d.get("chosen") == chosen.label and d.get("authorized"):
+    who = "authorized by the flight director" if d.get("supervised") else \
+          "selected autonomously"
+    btn_slot.success(f"MANEUVER ISSUED — {chosen.label}. {d['hero']} clears "
+                     f"{d['tname']} by {chosen.miss_km:.2f} km for "
+                     f"{chosen.delta_v_mps:.3f} m/s. {who.capitalize()}.")
+    with stat_slot:
+        m = st.columns(5)
+        m[0].metric("Objects screened", f"{d['swept']:,}")
+        m[1].metric("Clearance", f"{chosen.miss_km:.2f} km",
+                    f"+{chosen.miss_km - alert['miss_km']:.2f} km")
+        m[2].metric("Collision risk", f"{chosen.pc:.0e}", "cleared", delta_color="off")
+        m[3].metric("Fuel spent", f"{chosen.delta_v_mps:.3f} m/s")
+        m[4].metric("Alert to decision", f"{d['elapsed']:.1f} s")
+
+    st.markdown("<p class='kes-lab'>The encounter, seen from the satellite — "
+                "origin is the spacecraft</p>", unsafe_allow_html=True)
+    st.plotly_chart(encounter(d["r0"], d["v0"], r_burn, v_post, d["tr"], d["tv"],
+                              alert["tca_offset_s"], chosen.burn_offset_s,
+                              alert["miss_km"], chosen.miss_km,
+                              alert["rel_speed_kms"]),
+                    use_container_width=True, key="encounter_closeup")
+    st.caption(f"{trade['states_evaluated']/1e6:.0f}M states across "
+               f"{trade['scenarios']} scenarios · {d['fleet_n']} assets screened "
+               f"against {d['swept']:,} objects · independent propagators agree to "
+               f"{d['cc']*1000:.0f} m · uplink SIMULATED")
+
 if st.button("Reset"):
     st.session_state["done"] = None
     st.rerun()

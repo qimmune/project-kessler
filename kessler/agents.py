@@ -401,3 +401,79 @@ def _first_failure(res: dict) -> str:
         if not ch["pass"]:
             return f"{ch['check']}: {ch['detail']}"
     return res.get("error", "unspecified")
+
+
+# ----------------------------------------------------------------------
+# recommending from a costed trade space
+# ----------------------------------------------------------------------
+ADVISOR_SYSTEM = """You are the Mission Assurance Director advising a flight director.
+
+The physics engine has already generated and fully costed several avoidance
+maneuvers. Every number in front of you was measured by flying the burn and
+re-screening the resulting orbit against the whole catalogue. You are not being
+asked to check the arithmetic -- you are being asked which trade-off to take.
+
+Weigh, in roughly this order:
+  1. Feasibility. An infeasible option is not a candidate, whatever else it offers.
+  2. Clearance actually achieved against the separation minimum.
+  3. Propellant. It is the one consumable that sets the vehicle's remaining life.
+  4. Decision time. A later burn leaves room for better tracking data before
+     committing, which is worth real fuel.
+  5. Mission impact -- altitude drift the ground segment has to absorb.
+
+Respond with ONLY a JSON object, no prose, no code fence:
+{"recommended": "<exact option label>", "rationale": "two sentences, naming the
+numbers that decided it", "runner_up": "<label>", "why_not": "one sentence"}"""
+
+
+def recommend_option(options, alert: dict, state, bus) -> dict:
+    """Have the agent choose from the costed trade space, or fall back to a rule."""
+    feasible = [o for o in options if o.feasible]
+    if not feasible:
+        bus.emit("error", "No feasible option in the trade space -- escalating.")
+        return {"recommended": None, "rationale": "no option satisfies the constraints"}
+
+    payload = {
+        "conjunction": alert,
+        "constraints": {"separation_minimum_km": state.constraints.min_miss_km,
+                        "delta_v_budget_mps": state.constraints.dv_budget_mps,
+                        "altitude_box_km": state.constraints.altitude_box_km},
+        "options": [{
+            "label": o.label, "strategy": o.strategy, "feasible": o.feasible,
+            "miss_km": o.miss_km, "delta_v_mps": o.delta_v_mps,
+            "burn_in_minutes": round(o.burn_offset_s / 60, 1),
+            "altitude_drift_km": o.altitude_drift_km,
+            "new_conjunctions": o.secondary_count,
+            "pros": o.pros, "cons": o.cons,
+        } for o in options],
+    }
+
+    client = _client()
+    backend, model = resolve_backend()
+    if client is not None:
+        try:
+            msg = client.messages.create(
+                model=model, max_tokens=600, system=ADVISOR_SYSTEM,
+                messages=[{"role": "user", "content": json.dumps(payload, indent=2)}])
+            raw = "".join(b.text for b in msg.content if b.type == "text")
+            out = _extract_json(raw)
+            if out and any(o.label == out.get("recommended") for o in feasible):
+                bus.emit("agent2", f"Recommends {out['recommended']} -- {out.get('rationale','')}")
+                return out
+            bus.emit("error", "Advisor returned an unusable choice; using the rule.")
+        except Exception as exc:
+            bus.emit("error", f"Advisor call failed ({type(exc).__name__}); using the rule.")
+
+    # Rule: cheapest feasible option that also clears with margin.
+    best = min(feasible, key=lambda o: (o.delta_v_mps, -o.miss_km))
+    runner = min([o for o in feasible if o is not best],
+                 key=lambda o: o.delta_v_mps, default=None)
+    out = {"recommended": best.label,
+           "rationale": (f"{best.label} clears to {best.miss_km:.2f} km for "
+                         f"{best.delta_v_mps:.3f} m/s, the least propellant of any "
+                         f"option that satisfies every constraint."),
+           "runner_up": runner.label if runner else None,
+           "why_not": (f"{runner.label} costs {runner.delta_v_mps:.3f} m/s for "
+                       f"{runner.miss_km:.2f} km." if runner else "")}
+    bus.emit("agent2", f"Recommends {out['recommended']} -- {out['rationale']}")
+    return out

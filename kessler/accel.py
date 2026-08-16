@@ -92,5 +92,29 @@ def to_device(a):
     return out
 
 
+def free_pool() -> None:
+    """Release cached device blocks between passes so peak stays predictable."""
+    if not GPU:
+        return
+    try:
+        xp.get_default_memory_pool().free_all_blocks()
+        xp.get_default_pinned_memory_pool().free_all_blocks()
+    except Exception:
+        pass
+
+
+def memory_report() -> dict:
+    if not GPU:
+        return {"gpu": False}
+    try:
+        pool = xp.get_default_memory_pool()
+        free, total = xp.cuda.runtime.memGetInfo()
+        return {"gpu": True, "pool_used_gb": round(pool.used_bytes() / 1e9, 3),
+                "device_free_gb": round(free / 1e9, 2),
+                "device_total_gb": round(total / 1e9, 2)}
+    except Exception:
+        return {"gpu": True}
+
+
 def to_host(a):
     return xp.asnumpy(a) if GPU else np.asarray(a)
