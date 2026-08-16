@@ -75,7 +75,8 @@ When the trade space appears:
 > "Now the useful part. It didn't generate *one* answer. It generated five
 > different ways out, and it flew every one of them — re-checking each new orbit
 > against the whole catalogue to make sure the dodge doesn't cause a *different*
-> collision. That's about a hundred million position calculations."
+> collision. That's a hundred and fifty million position calculations, and it
+> took about twelve seconds."
 
 Point at the table:
 
@@ -93,6 +94,10 @@ Choose the recommendation, press **Execute this maneuver**.
 
 > "Four hundred metres becomes two kilometres, for about a seventh of a metre
 > per second of fuel. Authorized by me, not by the machine."
+
+**Verified numbers for this case:** 4 of 5 feasible. Balanced 2.06 km / 0.151 m/s ·
+Minimum fuel 2.08 km / 0.152 m/s · **Latest commit 2.09 km / 0.233 m/s, commit at
+T+41 min** · Drop back 2.39 km / 0.256 m/s. Plane shift fails.
 
 Scroll to the close-up:
 
@@ -116,6 +121,10 @@ Press **Engage** again.
 > "Watch what happens to the options."
 
 When it lands — **only 2 of 5 survive**:
+
+**Verified numbers:** Minimum fuel 5.17 km / 0.438 m/s at T+5 min · Balanced
+5.23 km / 0.441 m/s at T+13.8 min. **Latest commit reaches only 3.69 km and
+fails.** Drop back 4.50 km, fails. Plane shift 0.69 km, fails.
 
 > "Two survive. And look *which* two — both of them burn early. Five minutes
 > from now, or fourteen."
@@ -141,6 +150,11 @@ Execute, and close:
 
 ## If something goes wrong on the day
 
+- **The exact figures move a little between runs.** The catalogue is live and
+  the satellite's own orbit shifts, so the shortlist size and the state count
+  vary. The shape never changes: story 1 gives 4 feasible including the late
+  option, story 2 gives 2 and kills the late one. If that shape breaks, the
+  slider settings drifted.
 - **Nothing feasible** — separation minimum is too high for the fuel budget.
   Lower separation or raise fuel. Never demo `Look-ahead` under about 40 min with
   a tight budget; physics runs out.
