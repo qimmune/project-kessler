@@ -232,7 +232,11 @@ def solve_options(state: MissionState, catalog_objects, tca_offset_s: float,
     that justifies the hardware.
     """
     c = state.constraints
-    target = target_miss_km or c.min_miss_km * 1.25
+    # Aim just over the requirement, not well past it. Calibrating to a generous
+    # margin spends propellant nobody asked for and -- worse -- can push an
+    # option that already satisfied the constraint over the delta-v budget,
+    # manufacturing an infeasible trade space out of a solvable one.
+    target = target_miss_km or c.min_miss_km * 1.06
 
     cands = generate_candidates(state, tca_offset_s, target)
     first = evaluate_options(state, catalog_objects, cands, tca_offset_s)
@@ -242,13 +246,23 @@ def solve_options(state: MissionState, catalog_objects, tca_offset_s: float,
 
     tuned = []
     for o in first["options"]:
+        # An option that already clears is left alone. Re-sizing a working
+        # solution can only cost fuel or break it.
+        if o.feasible:
+            tuned.append(Option(label=o.label, strategy=o.strategy,
+                                direction_ric=o.direction_ric,
+                                delta_v_mps=o.delta_v_mps,
+                                burn_offset_s=o.burn_offset_s,
+                                decision_time_s=o.burn_offset_s))
+            continue
         achieved = max(o.miss_km, 1e-3)
-        need = target * 1.06
-        scale = float(np.clip(need / achieved, 0.4, 6.0))
-        dv = o.delta_v_mps * scale
+        scale = float(np.clip(target / achieved, 0.4, 6.0))
+        # Never let calibration invent a budget violation; propose at most the
+        # budget and let the checks decide whether that is enough.
+        dv = min(o.delta_v_mps * scale, c.dv_budget_mps)
         tuned.append(Option(label=o.label, strategy=o.strategy,
                             direction_ric=o.direction_ric,
-                            delta_v_mps=round(min(dv, c.dv_budget_mps * 3.0), 4),
+                            delta_v_mps=round(dv, 4),
                             burn_offset_s=o.burn_offset_s,
                             decision_time_s=o.burn_offset_s))
 

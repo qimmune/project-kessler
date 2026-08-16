@@ -259,7 +259,7 @@ with st.spinner("Loading the catalogue…"):
 ts = timescale()
 t0 = ts.now()
 
-with st.expander("Advanced"):
+with st.expander("Advanced", expanded=False):
     a = st.columns(4)
     fleet_n = a[0].slider("Assets protected", 4, 30, 12)
     env_n = st.select_slider(

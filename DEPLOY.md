@@ -94,3 +94,4 @@ and trade memory for fewer, larger kernels.
 | Nemotron endpoint down | Nothing to do — the deterministic solver takes over and the physics is identical. |
 | Trade space too slow live | Lower `Assets protected` in **Advanced**, or drop the modeled debris layer to `off`. |
 | UI looks stale after a code change | Streamlit keeps session state across reloads; hit **Reset**, or restart. |
+| `ImportError: cannot import name ...` in the browser | Streamlit hot-reloads `app.py` but **not** deeply-imported modules. After editing anything under `kessler/`, restart the server — `Ctrl-C` then `./scripts/run.sh`. This is the single most common false alarm. |

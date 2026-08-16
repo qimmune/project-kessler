@@ -162,6 +162,10 @@ run_demo.py       CLI, exercises the original two-agent loop
 - Every `st.plotly_chart` needs an explicit `key=` — Streamlit derives ids from
   call parameters and identical charts collide.
 - Run `./scripts/test.sh` before pushing.
+- **Restart Streamlit after editing anything under `kessler/`.** It hot-reloads
+  `app.py` but not deeply-imported modules, so a newly added function shows up
+  in the browser as `ImportError: cannot import name ...` while a fresh
+  interpreter imports it fine. This has already caused one false alarm.
 
 ## Event and submission context
 
