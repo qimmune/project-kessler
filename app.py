@@ -277,7 +277,7 @@ c = Constraints(dv_budget_mps=dv_budget, min_miss_km=sep_km)
 plot_slot = st.empty()
 btn_slot = st.empty()
 stat_slot = st.container()
-log_slot = st.container()
+log_slot = st.empty()   # one element, replaced -- a container would append
 
 if "done" not in st.session_state:
     st.session_state["done"] = None
@@ -306,11 +306,10 @@ if not engage and st.session_state["done"] is None:
 # ----------------------------------------------------------------- run
 if engage:
     events: list[Event] = []
-    live = log_slot.empty()
 
     def sink(ev):
         events.append(ev)
-        live.markdown(log_html(events, set(TAG)), unsafe_allow_html=True)
+        log_slot.markdown(log_html(events, set(TAG)), unsafe_allow_html=True)
 
     bus = Bus(sink=sink)
     t_start = time.time()
