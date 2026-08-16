@@ -31,7 +31,7 @@ LEO_VIEW_KM = 8200.0
 # Bumped whenever the shape of st.session_state["done"] changes. Streamlit keeps
 # session state across hot-reloads, so without this a dict written by an older
 # build survives into new code and blows up on a key that did not exist yet.
-STATE_SCHEMA = 4
+STATE_SCHEMA = 6
 EARTH_TEX = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                          "data", "earth_720x360.npy")
 
@@ -272,7 +272,6 @@ with st.expander("Advanced", expanded=False):
     horizon_h = a[1].slider("Look-ahead (h)", 1.0, 12.0, 6.0, .5)
     sep_km = a[2].slider("Separation minimum (km)", 1.0, 10.0, 2.0, .1)
     dv_budget = a[3].slider("Δv budget (m/s)", .05, 1.0, .35, .01)
-    supervised = st.checkbox("Require human authorization before any burn", value=False)
 
 c = Constraints(dv_budget_mps=dv_budget, min_miss_km=sep_km)
 plot_slot = st.empty()
@@ -296,8 +295,9 @@ if not engage and st.session_state["done"] is None:
         m[0].metric("Objects tracked", f"{len(cat):,}")
         m[1].metric("Assets protected", fleet_n)
         m[2].metric("Threats", "—")
-        m[3].metric("Human minutes", "0")
-    st.caption(f"{len(cat):,} objects carry real TLEs and are screened. "
+        m[3].metric("Final call", "Human")
+    st.caption(f"The engine narrows the problem; a person makes the call. "
+               f"{len(cat):,} objects carry real TLEs and are screened. "
                f"An estimated {TOTAL_OVER_1MM/1e6:.0f} million fragments larger than a "
                f"millimetre exist and are not tracked by anyone — the dim cloud is a "
                f"modeled sample of that population, shown for context only.")
@@ -402,7 +402,7 @@ if engage:
         hero=hero.name, tname=tname, gast=float(t0.gast), cc=cc.residual_km,
         watch=len(res.watching), swept=res.catalog_size, states=res.states,
         sweep_s=res.elapsed_s, fleet_n=len(fleet), elapsed=time.time() - t_start,
-        supervised=supervised, authorized=False, chosen=None)
+        authorized=False, chosen=None)
 
 d = st.session_state["done"]
 alert, trade, rec = d["alert"], d["trade"], d["rec"]
@@ -482,8 +482,12 @@ for i, o in enumerate(feasible[:4]):
                         f"<span style='font-size:.82rem'>{x}</span>",
                         unsafe_allow_html=True)
 
-# ---------------------------------------------------------------- selection
-st.markdown("<p class='kes-lab'>Flight director decision</p>", unsafe_allow_html=True)
+# ---------------------------------------------------------------- decision
+# A human always makes the call. The engine narrows an unbounded problem to a
+# handful of costed, verified choices in seconds; it does not get to fire the
+# thruster. Nothing leaves this console without someone pressing Execute.
+st.markdown("<p class='kes-lab'>Flight director decision — "
+            "nothing is issued until you choose</p>", unsafe_allow_html=True)
 labels = [o.label for o in feasible]
 default = labels.index(rec["recommended"]) if rec.get("recommended") in labels else 0
 choice = st.radio("Select the maneuver to execute", labels, index=default,
@@ -504,19 +508,24 @@ execute = go_cols[0].button("Execute this maneuver", type="primary")
 hold = go_cols[1].button("Hold — take none")
 
 if hold:
-    st.session_state["done"] = None
-    st.rerun()
+    d["chosen"], d["authorized"] = None, False
+    st.warning(f"**HELD** — no command issued. {d['hero']} stays on its original "
+               f"path and closes to {alert['miss_km']:.3f} km with "
+               f"{d['tname']}.")
+    if st.button("Reset"):
+        st.session_state["done"] = None
+        st.rerun()
+    st.stop()
 
 if execute:
     d["chosen"] = chosen.label
     d["authorized"] = True
 
 if d.get("chosen") == chosen.label and d.get("authorized"):
-    who = "authorized by the flight director" if d.get("supervised") else \
-          "selected autonomously"
     btn_slot.success(f"MANEUVER ISSUED — {chosen.label}. {d['hero']} clears "
                      f"{d['tname']} by {chosen.miss_km:.2f} km for "
-                     f"{chosen.delta_v_mps:.3f} m/s. {who.capitalize()}.")
+                     f"{chosen.delta_v_mps:.3f} m/s. Authorized by the flight "
+                     f"director; uplink simulated.")
     with stat_slot:
         m = st.columns(5)
         m[0].metric("Objects screened", f"{d['swept']:,}")
@@ -524,7 +533,7 @@ if d.get("chosen") == chosen.label and d.get("authorized"):
                     f"+{chosen.miss_km - alert['miss_km']:.2f} km")
         m[2].metric("Collision risk", f"{chosen.pc:.0e}", "cleared", delta_color="off")
         m[3].metric("Fuel spent", f"{chosen.delta_v_mps:.3f} m/s")
-        m[4].metric("Alert to decision", f"{d['elapsed']:.1f} s")
+        m[4].metric("Alert to options", f"{d['elapsed']:.1f} s")
 
     st.markdown("<p class='kes-lab'>The encounter, seen from the satellite — "
                 "origin is the spacecraft</p>", unsafe_allow_html=True)

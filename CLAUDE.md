@@ -43,15 +43,20 @@ Observed preferences, stated plainly because getting these wrong wastes their ti
 
 | Claim | Status |
 |---|---|
-| 12-hour manual bottleneck → **4-second** autonomous loop | Cameron's framing; used verbatim on slide 5 |
+| 12-hour manual bottleneck → seconds to a costed decision | Cameron's framing. Say "to a decision", not "autonomous" — a human always executes |
 | 128 GB unified memory, zero PCIe copies | Now *measured* by `accel.py`, not asserted |
 | ~99M states across a 5-option trade space | Real, printed every run |
 | 0.412 km → 2.48 km for 0.189 m/s | The seeded demo encounter |
 | 15,275 satellites + 2,635 tracked debris | Real, from CelesTrak |
 | ~140M fragments | True only as *">1 mm, 99.97% untracked"* — never render them as tracked |
 
-**Open decision:** slide 5 says `requires_human_ack: false`; the UI now offers a
-human five costed options. Both modes work. Pick one and re-cut the slide.
+**Resolved:** there is no autonomous mode. Cameron's call, and it is the right
+one — nobody fires a thruster on a multi-million-dollar asset without a person
+saying yes. The engine narrows an unbounded problem to a handful of costed,
+verified options in seconds; a human always presses Execute. **The deck's slide 5
+still says `requires_human_ack: false` and now contradicts the product — it needs
+re-cutting before the pitch.** The stronger line is that the machine removes the
+hours, not the human.
 
 ## What it does
 

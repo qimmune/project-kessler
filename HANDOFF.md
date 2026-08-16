@@ -107,10 +107,10 @@ something went wrong without it.
 
 ## Open questions for the team
 
-- **Autonomous or supervised for the pitch?** The deck's punchline is
-  `requires_human_ack: false`; the trade-space UI hands a human five costed
-  options. Both are built and switchable. They tell different stories — pick one
-  before presenting, and re-cut slide 5 to match.
+- **Slide 5 of the deck is now wrong.** The autonomous mode was removed on
+  purpose: a human always presses Execute. The slide still says
+  `requires_human_ack: false`. Re-cut it — the honest and stronger claim is that
+  the system removes the *hours*, not the human.
 - **How long is the trade space allowed to take live?** 8 s on CPU here. If the
   GPU does not materially beat that on the box, drop `Assets protected` or the
   modeled debris layer rather than standing in silence.

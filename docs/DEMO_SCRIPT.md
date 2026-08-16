@@ -17,7 +17,12 @@ for satellites.
 | **Separation minimum (km)** | How much room we insist on between our satellite and the junk | We're pickier about safety, so a dodge is harder and costs more fuel |
 | **Δv budget (m/s)** | How much fuel we'll allow for one dodge | We can afford a bigger shove |
 | **Modeled debris (sample size)** | How much of the untracked junk we *draw* on screen | It looks more crowded. **Cosmetic only — never used in any calculation** |
-| **Require human authorization** | Does a person have to say yes before the engine fires? | Ticked = a human approves. Unticked = it decides for itself |
+
+
+**A human always presses the button.** There is no autonomous mode and that is
+deliberate: nobody launches a thruster burn on a multi-million-dollar asset
+without a person saying yes. What the machine removes is not the human — it is
+the *hours* the human used to spend before they could decide.
 
 **Two of these fight each other, and that fight is the whole demo:**
 **Separation minimum** is how safe you insist on being. **Δv budget** is how much
@@ -57,7 +62,7 @@ Open **Advanced**. Point at each slider as you say it:
 ## Part 2 — the easy case (≈60 s)
 
 **Set exactly:** Assets 12 · Look-ahead 6 h · **Separation minimum 2.0 km** ·
-**Δv budget 0.35 m/s** · debris 45k · human authorization **off**
+**Δv budget 0.35 m/s** · debris 45k  *(all defaults)*
 
 Press **Engage orbital traffic control**.
 
@@ -79,12 +84,15 @@ Point at the table:
 > which matters because better tracking data might arrive. This one drops the
 > orbit instead of raising it."
 >
-> "The agent recommends one and explains why. But a human picks."
+> "The agent recommends one and explains why. But it does not fire anything —
+> a human picks, and a human presses the button. That is the point: the machine
+> collapses hours of orbital mechanics into seconds of choosing, and then it
+> stops."
 
 Choose the recommendation, press **Execute this maneuver**.
 
-> "Four hundred metres becomes two kilometres, for about a fifth of a metre per
-> second of fuel."
+> "Four hundred metres becomes two kilometres, for about a seventh of a metre
+> per second of fuel. Authorized by me, not by the machine."
 
 Scroll to the close-up:
 
@@ -120,12 +128,14 @@ When it lands — **only 2 of 5 survive**:
 > just disappeared.** You wanted to be safer, and the price wasn't fuel — it was
 > the option to think about it."
 
-> "That is why this has to run in seconds and not hours. By the time a human
-> team finished the analysis by hand, the cheap options would already be gone."
+> "That is why this has to run in seconds and not hours. The decision still
+> belongs to a person — but by the time a human team finished this analysis by
+> hand, the options they were deciding between would already be gone."
 
 Execute, and close:
 
-> "Five kilometres of clearance. Nobody had to do orbital mechanics by hand."
+> "Five kilometres of clearance. A person made the call, with every option
+> costed in front of them, inside a window where a call was still possible."
 
 ---
 
