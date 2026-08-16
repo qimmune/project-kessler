@@ -183,6 +183,47 @@ before the crossing-geometry factor. The physics is doing the work.
 
 ---
 
+## NVIDIA ecosystem
+
+| Component | Where | What it does |
+|---|---|---|
+| **NVIDIA Nemotron** | `kessler/agents.py` | Drives both agents — the Flight Dynamics Officer and the Mission Assurance critic — over an OpenAI-compatible endpoint, with tool calling into the physics engine |
+| **NVIDIA NIM** | `KESSLER_BASE_URL` | Point at a local NIM to keep the whole agent loop on-device; no token leaves the box |
+| **CuPy / CUDA** | `kessler/accel.py` | The conjunction screening sweep runs on the GPU when CUDA is present, NumPy otherwise — same code path both ways |
+| **DGX Spark / GB10 Grace Blackwell** | `kessler/monitor.py` | The ephemeris is propagated once into a resident state matrix and screened in place; transfer volume is measured, not asserted |
+
+```bash
+# Local Nemotron on a NIM — nothing leaves the machine
+export KESSLER_BACKEND=nemotron
+export KESSLER_BASE_URL=http://localhost:8000/v1
+export KESSLER_MODEL=nvidia/nemotron-3-super
+
+# or hosted
+export NVIDIA_API_KEY=nvapi-...
+export KESSLER_BASE_URL=https://integrate.api.nvidia.com/v1
+```
+
+Backend resolution is automatic: Nemotron if an NVIDIA key or base URL is set,
+Claude if an Anthropic key is, otherwise the deterministic solver. All three
+drive the same tool and the same physics.
+
+### The unified-memory claim, measured
+
+`kessler/accel.py` instruments every host-to-device transfer — count, bytes, and
+seconds — and `sweep_fleet` reports it. On a discrete GPU the ephemeris crosses
+PCIe on every sweep and the number is large. On GB10, Grace and Blackwell share
+one address space and the handoff is a pointer, so it collapses. The demo prints
+whichever it actually got rather than claiming the good one.
+
+```
+backend  : cupy on NVIDIA GB10
+transfer : {'calls': N, 'bytes': ..., 'seconds': ...}
+```
+
+Set `KESSLER_FORCE_CPU=1` to pin NumPy and show the contrast side by side.
+
+---
+
 ## LeoLabs
 
 The dashboard can embed LeoLabs' public LEO visualization beside our own screen —

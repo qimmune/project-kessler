@@ -14,12 +14,28 @@ from __future__ import annotations
 import json
 import os
 import re
+import types
 
 from .bus import Bus
 from .mission import MissionState, evaluate_maneuver
 
-MODEL = os.environ.get("KESSLER_MODEL", "claude-sonnet-5")
 MAX_ROUNDS = 4
+
+# Backend selection.
+#   nemotron -> NVIDIA Nemotron over an OpenAI-compatible endpoint. Point
+#               KESSLER_BASE_URL at a local NIM on the DGX Spark to keep the
+#               whole loop on-device, or at build.nvidia.com to run hosted.
+#   claude   -> Anthropic API.
+#   offline  -> deterministic solver, same tool and same physics, no model.
+BACKEND = os.environ.get("KESSLER_BACKEND", "auto").lower()
+MODEL = os.environ.get("KESSLER_MODEL", "")
+BASE_URL = os.environ.get("KESSLER_BASE_URL", "http://localhost:8000/v1")
+NVIDIA_KEY = os.environ.get("NVIDIA_API_KEY", "")
+
+DEFAULT_MODELS = {
+    "nemotron": "nvidia/nemotron-3-super",
+    "claude": "claude-sonnet-5",
+}
 
 FDO_SYSTEM = """You are an autonomous Flight Dynamics Officer for a satellite operator.
 
@@ -71,14 +87,100 @@ def _extract_json(text: str) -> dict | None:
         return None
 
 
+def resolve_backend() -> tuple[str, str]:
+    """Pick the backend and model actually available, honouring KESSLER_BACKEND."""
+    want = BACKEND
+    if want == "auto":
+        if NVIDIA_KEY or os.environ.get("KESSLER_BASE_URL"):
+            want = "nemotron"
+        elif os.environ.get("ANTHROPIC_API_KEY"):
+            want = "claude"
+        else:
+            want = "offline"
+    return want, MODEL or DEFAULT_MODELS.get(want, "")
+
+
+class NemotronClient:
+    """Nemotron over an OpenAI-compatible endpoint, adapted to the Anthropic-shaped
+    call sites used below so both backends drive one code path.
+
+    Tool calls come back in OpenAI's `tool_calls` form and are re-emitted as
+    Anthropic-style `tool_use` blocks; tool results are folded back into the
+    conversation as `role: tool` messages.
+    """
+
+    def __init__(self, model: str, base_url: str, api_key: str):
+        from openai import OpenAI
+        self.model = model
+        self.client = OpenAI(base_url=base_url, api_key=api_key or "not-needed")
+        self.messages = self
+
+    @staticmethod
+    def _to_openai_tools(tools):
+        return [{"type": "function",
+                 "function": {"name": t["name"], "description": t["description"],
+                              "parameters": t["input_schema"]}} for t in (tools or [])]
+
+    def _to_openai_messages(self, system, messages):
+        out = [{"role": "system", "content": system}]
+        for m in messages:
+            content = m["content"]
+            if isinstance(content, str):
+                out.append({"role": m["role"], "content": content})
+                continue
+            if m["role"] == "assistant":
+                calls = [c for c in content if getattr(c, "type", None) == "tool_use"]
+                text = "".join(getattr(c, "text", "") for c in content
+                               if getattr(c, "type", None) == "text")
+                msg = {"role": "assistant", "content": text or None}
+                if calls:
+                    msg["tool_calls"] = [
+                        {"id": c.id, "type": "function",
+                         "function": {"name": c.name, "arguments": json.dumps(c.input)}}
+                        for c in calls]
+                out.append(msg)
+            else:
+                for c in content:
+                    if isinstance(c, dict) and c.get("type") == "tool_result":
+                        out.append({"role": "tool", "tool_call_id": c["tool_use_id"],
+                                    "content": c["content"]})
+        return out
+
+    def create(self, model=None, max_tokens=800, system="", tools=None, messages=()):
+        kw = dict(model=self.model, max_tokens=max_tokens,
+                  messages=self._to_openai_messages(system, list(messages)))
+        if tools:
+            kw["tools"] = self._to_openai_tools(tools)
+            kw["tool_choice"] = "auto"
+        r = self.client.chat.completions.create(**kw)
+        msg = r.choices[0].message
+        blocks = []
+        if msg.content:
+            blocks.append(types.SimpleNamespace(type="text", text=msg.content))
+        for tc in (msg.tool_calls or []):
+            try:
+                args = json.loads(tc.function.arguments or "{}")
+            except json.JSONDecodeError:
+                args = {}
+            blocks.append(types.SimpleNamespace(type="tool_use", id=tc.id,
+                                                name=tc.function.name, input=args))
+        return types.SimpleNamespace(content=blocks)
+
+
 def _client():
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        return None
-    try:
-        from anthropic import Anthropic
-        return Anthropic()
-    except Exception:
-        return None
+    backend, model = resolve_backend()
+    if backend == "nemotron":
+        try:
+            return NemotronClient(model, BASE_URL, NVIDIA_KEY)
+        except Exception:
+            return None
+    if backend == "claude" and os.environ.get("ANTHROPIC_API_KEY"):
+        try:
+            from anthropic import Anthropic
+            return Anthropic()
+        except Exception:
+            return None
+    return None
 
 
 SIMULATE_TOOL = {
@@ -169,8 +271,14 @@ def _offline_proposal(alert: dict, feedback: dict | None, state: MissionState) -
 def run_resolution(state: MissionState, catalog_objects, alert: dict, bus: Bus,
                    max_rounds: int = MAX_ROUNDS) -> dict:
     client = _client()
-    mode = f"claude ({MODEL})" if client else "offline solver (no ANTHROPIC_API_KEY)"
-    bus.emit("status", f"Agent pipeline online -- {mode}")
+    backend, model = resolve_backend()
+    if client is None:
+        mode = "deterministic solver (no model backend configured)"
+    elif backend == "nemotron":
+        mode = f"NVIDIA Nemotron -- {model} @ {BASE_URL}"
+    else:
+        mode = f"Claude -- {model}"
+    bus.emit("status", f"Agent pipeline online: {mode}")
 
     feedback = None
     history = []
@@ -187,7 +295,7 @@ def run_resolution(state: MissionState, catalog_objects, alert: dict, bus: Bus,
             if feedback:
                 user["previous_attempt_rejected"] = feedback
             msg = client.messages.create(
-                model=MODEL, max_tokens=700, system=FDO_SYSTEM,
+                model=model, max_tokens=700, system=FDO_SYSTEM,
                 messages=[{"role": "user", "content": json.dumps(user, indent=2)}])
             raw = "".join(b.text for b in msg.content if b.type == "text")
             proposal = _extract_json(raw)
@@ -224,7 +332,7 @@ def run_resolution(state: MissionState, catalog_objects, alert: dict, bus: Bus,
             tool_result = None
             for _ in range(3):
                 msg = client.messages.create(
-                    model=MODEL, max_tokens=900, system=MAD_SYSTEM,
+                    model=model, max_tokens=900, system=MAD_SYSTEM,
                     tools=[SIMULATE_TOOL], messages=messages)
                 calls = [b for b in msg.content if b.type == "tool_use"]
                 if not calls:

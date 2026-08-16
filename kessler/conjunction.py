@@ -10,6 +10,7 @@ from dataclasses import dataclass, asdict
 
 import numpy as np
 
+from .accel import to_device, to_host, xp
 from .physics import teme_positions_many, teme_states_many, timescale, propagate, elements
 
 
@@ -104,11 +105,14 @@ def screen(hero, catalog_objects, t0, horizon_s: float = 3 * 3600,
     hero_r = teme_positions_many([hero], t_grid)[0]              # (T, 3)
     all_r = teme_positions_many(catalog_objects, t_grid)          # (N, T, 3)
 
-    delta = all_r - hero_r[None, :, :]
-    dist = np.linalg.norm(delta, axis=2)                          # (N, T)
-    dist = np.where(np.isnan(dist), np.inf, dist)
+    # The distance sweep runs on the accelerator when one is present.
+    g_all = to_device(all_r)
+    g_hero = to_device(hero_r)
+    dist = xp.linalg.norm(g_all - g_hero[None, :, :], axis=2)      # (N, T)
+    dist = xp.where(xp.isnan(dist), xp.inf, dist)
+    min_d = to_host(dist.min(axis=1))
+    dist = to_host(dist)
 
-    min_d = dist.min(axis=1)
     hits = np.where(min_d < threshold_km)[0]
 
     out: list[Conjunction] = []
@@ -178,9 +182,10 @@ def screen_trajectory(hero_r0, hero_v0, catalog_objects, t0, horizon_s: float,
     hero_track = rs[:, :n].T                                      # (T, 3)
 
     all_r = teme_positions_many(catalog_objects, t_grid)[:, :n, :]
-    dist = np.linalg.norm(all_r - hero_track[None, :, :], axis=2)
-    dist = np.where(np.isnan(dist), np.inf, dist)
-    min_d = dist.min(axis=1)
+    g_all, g_hero = to_device(all_r), to_device(hero_track)
+    d = xp.linalg.norm(g_all - g_hero[None, :, :], axis=2)
+    d = xp.where(xp.isnan(d), xp.inf, d)
+    dist, min_d = to_host(d), to_host(d.min(axis=1))
 
     found = []
     for idx in np.where(min_d < threshold_km)[0]:

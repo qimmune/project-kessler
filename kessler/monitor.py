@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from .accel import Transfer, backend_name, to_device, to_host, xp
 from .conjunction import Conjunction, refine_encounter
 from .mission import Constraints, requires_action
 from .physics import elements, teme_positions_many, teme_state, timescale
@@ -44,6 +45,8 @@ class SweepResult:
     states: int
     matrix_mb: float
     elapsed_s: float
+    backend: str = "numpy (CPU)"
+    transfer: dict = field(default_factory=dict)
     scanned_at: float = field(default_factory=time.time)
 
     @property
@@ -75,8 +78,10 @@ def sweep_fleet(assets, catalog_objects, t0, horizon_s: float = 6 * 3600,
     t_grid = ts.tt_jd(t0.tt + np.arange(n_epochs) * (coarse_step_s / 86400.0))
 
     # ---- the one propagation everything else reads ----
+    Transfer.reset()
     all_r = teme_positions_many(catalog_objects, t_grid)            # (N, T, 3)
     matrix_mb = all_r.nbytes / 1e6
+    g_all = to_device(all_r)      # on unified memory this is a pointer handoff
 
     asset_names = {id(a) for a in assets}
     statuses: list[AssetStatus] = []
@@ -90,10 +95,10 @@ def sweep_fleet(assets, catalog_objects, t0, horizon_s: float = 6 * 3600,
         except Exception:
             continue
 
-        hero_r = teme_positions_many([asset], t_grid)[0]            # (T, 3)
-        dist = np.linalg.norm(all_r - hero_r[None, :, :], axis=2)   # (N, T)
-        dist = np.where(np.isnan(dist), np.inf, dist)
-        min_d = dist.min(axis=1)
+        hero_r = to_device(teme_positions_many([asset], t_grid)[0])  # (T, 3)
+        d = xp.linalg.norm(g_all - hero_r[None, :, :], axis=2)        # (N, T)
+        d = xp.where(xp.isnan(d), xp.inf, d)
+        dist, min_d = to_host(d), to_host(d.min(axis=1))
 
         st = AssetStatus(name=asset.name, alt_km=alt)
         order = np.argsort(min_d)
@@ -123,4 +128,5 @@ def sweep_fleet(assets, catalog_objects, t0, horizon_s: float = 6 * 3600,
                                  s.worst.miss_km if s.worst else 1e9))
     return SweepResult(statuses=statuses, t0=t0, catalog_size=len(catalog_objects),
                        epochs=n_epochs, states=all_r.shape[0] * all_r.shape[1],
-                       matrix_mb=matrix_mb, elapsed_s=time.time() - started)
+                       matrix_mb=matrix_mb, elapsed_s=time.time() - started,
+                       backend=backend_name(), transfer=Transfer.report())
