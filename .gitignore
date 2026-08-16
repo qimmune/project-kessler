@@ -5,3 +5,4 @@ data/*.tle
 .env
 .DS_Store
 !data/*.npy
+openclaw/state/
