@@ -27,6 +27,10 @@ VOID, PANEL, LINE = "#05080F", "#0F1728", "#22304C"
 INK, MUTED = "#E9EEF7", "#8494AD"
 AMBER, ICE, ALERT, NOMINAL = "#F2A03D", "#6FB6E8", "#FF4757", "#4FD1A5"
 LEO_VIEW_KM = 8200.0
+# Bumped whenever the shape of st.session_state["done"] changes. Streamlit keeps
+# session state across hot-reloads, so without this a dict written by an older
+# build survives into new code and blows up on a key that did not exist yet.
+STATE_SCHEMA = 2
 EARTH_TEX = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                          "data", "earth_720x360.npy")
 
@@ -277,12 +281,15 @@ log_slot = st.container()
 
 if "done" not in st.session_state:
     st.session_state["done"] = None
+elif (st.session_state["done"] or {}).get("schema") != STATE_SCHEMA:
+    st.session_state["done"] = None      # stale shape from a previous build
 
 engage = btn_slot.button("Engage orbital traffic control", type="primary")
 
 if not engage and st.session_state["done"] is None:
     plot_slot.plotly_chart(globe(cloud_snapshot(cat.objects, float(t0.tt)),
-                                 gast=float(t0.gast), env_n=env_n), use_container_width=True)
+                                 gast=float(t0.gast), env_n=env_n),
+                           use_container_width=True, key="globe_idle")
     with stat_slot:
         m = st.columns(4)
         m[0].metric("Objects tracked", f"{len(cat):,}")
@@ -309,7 +316,7 @@ if engage:
     fleet = select_fleet(cat.objects, "STARLINK", fleet_n)
     cloud = cloud_snapshot(cat.objects, float(t0.tt))
     plot_slot.plotly_chart(globe(cloud, gast=float(t0.gast), env_n=env_n),
-                           use_container_width=True)
+                           use_container_width=True, key="globe_scan")
 
     bus.emit("status", f"Catalogue online — {len(cat):,} tracked objects")
     bus.emit("status", f"Protecting {len(fleet)} assets")
@@ -342,7 +349,7 @@ if engage:
     plot_slot.plotly_chart(globe(cloud, [(pre, ICE, hero.name, 5), (thr, ALERT, tname, 4)],
                                  [(r_at[:, -1], ALERT, "Impact point")],
                                  gast=float(t0.gast), env_n=env_n),
-                           use_container_width=True)
+                           use_container_width=True, key="globe_threat")
 
     alert = {"primary": hero.name, "secondary": tname, "tca_offset_s": enc["tca_offset_s"],
              "miss_km": round(enc["miss_km"], 4), "pc": enc["pc"],
@@ -353,6 +360,7 @@ if engage:
     out = run_resolution(state, altitude_shortlist(cat.objects, el, 50.0), alert, bus)
 
     st.session_state["done"] = dict(
+        schema=STATE_SCHEMA, env_n=env_n,
         events=events, out=out, alert=alert, cloud=cloud, pre=pre, thr=thr,
         tca_pt=r_at[:, -1], r0=r0, v0=v0, tr=tr, tv=tv, horizon=horizon,
         hero=hero.name, tname=tname, gast=float(t0.gast), cc=cc.residual_km,
@@ -367,7 +375,8 @@ log_slot.markdown(log_html(d["events"], set(TAG)), unsafe_allow_html=True)
 if not out["approved"]:
     plot_slot.plotly_chart(globe(d["cloud"], [(d["pre"], ICE, d["hero"], 5),
                                               (d["thr"], ALERT, d["tname"], 4)],
-                                 gast=d["gast"], env_n=d["env_n"]), use_container_width=True)
+                                 gast=d["gast"], env_n=d.get("env_n", env_n)),
+                           use_container_width=True, key="globe_nofix")
     st.error("No safe maneuver inside the constraint set — escalated to a human operator.")
     st.stop()
 
@@ -377,11 +386,12 @@ dv = np.array(p["direction_ric"], float)
 v_post = apply_burn(rb[:, -1], vb[:, -1], dv / np.linalg.norm(dv) * p["delta_v_mps"])
 _, post, _ = propagate(rb[:, -1], v_post, d["horizon"] - p["burn_offset_s"], dt_s=15.0)
 
-if d["supervised"] and not d["authorized"]:
+if d.get("supervised") and not d.get("authorized"):
     plot_slot.plotly_chart(globe(d["cloud"], [(d["pre"], ICE, d["hero"], 5),
                                               (d["thr"], ALERT, d["tname"], 4)],
                                  [(d["tca_pt"], ALERT, "Impact point")], gast=d["gast"],
-                                 env_n=d["env_n"]), use_container_width=True)
+                                 env_n=d.get("env_n", env_n)),
+                           use_container_width=True, key="globe_await")
     st.warning(f"Maneuver cleared by the engine — awaiting authorization. "
                f"{p['delta_v_mps']:.3f} m/s buys {r['new_miss_km']:.2f} km.")
     g = st.columns(2)
@@ -398,10 +408,13 @@ plot_slot.plotly_chart(
           [(d["pre"], "#55637C", "Original path", 3), (d["thr"], ALERT, d["tname"], 4),
            (post, NOMINAL, f"{d['hero']} — corrected", 7)],
           [(d["tca_pt"], ALERT, "Impact point"), (rb[:, -1], AMBER, "Burn")],
-          gast=d["gast"], env_n=d["env_n"]), use_container_width=True)
+          gast=d["gast"], env_n=d.get("env_n", env_n)),
+    use_container_width=True, key="globe_final")
 
+_who = ("authorized by the operator" if d.get("supervised")
+        else "no human in the loop")
 btn_slot.success(f"COLLISION AVERTED — {d['hero']} clears {d['tname']} by "
-                 f"{r['new_miss_km']:.2f} km. No human in the loop.")
+                 f"{r['new_miss_km']:.2f} km. {_who.capitalize()}.")
 with stat_slot:
     m = st.columns(5)
     m[0].metric("Objects screened", f"{d['swept']:,}")
@@ -416,7 +429,7 @@ st.markdown("<p class='kes-lab'>The encounter, seen from the satellite — "
 st.plotly_chart(encounter(d["r0"], d["v0"], rb[:, -1], v_post, d["tr"], d["tv"],
                           alert["tca_offset_s"], p["burn_offset_s"],
                           alert["miss_km"], r["new_miss_km"], alert["rel_speed_kms"]),
-                use_container_width=True)
+                use_container_width=True, key="encounter_closeup")
 st.caption(f"{d['states']/1e6:.1f}M state vectors propagated in {d['sweep_s']:.2f} s · "
            f"{d['fleet_n']} assets screened against {d['swept']:,} objects · "
            f"{d['watch']} approaches logged · independent propagators agree to "
