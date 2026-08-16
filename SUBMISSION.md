@@ -208,3 +208,13 @@ Suggestions, edit to taste:
   compute kernel against the same memory and had no way to reason about
   contention between them.
 ```
+
+---
+
+## Handoff
+
+`CLAUDE.md` in the repo root carries the full engineering context and is loaded
+automatically when the repo is opened with Claude Code — that is how to move
+this to another account without losing anything. `HANDOFF.md` is the human
+narrative: current state, every non-obvious bug and why it mattered, what was
+deliberately not done, and the open questions.
