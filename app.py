@@ -7,6 +7,7 @@ Three modes:
 """
 from __future__ import annotations
 
+import os
 import time
 
 import numpy as np
@@ -17,7 +18,7 @@ import streamlit.components.v1 as components
 from kessler.agents import run_resolution
 from kessler.assurance import Authorization, EngagementLog, Mode, cross_check
 from kessler.bus import Bus, Event
-from kessler.catalog import load_demo_catalog
+from kessler.catalog import classify, load_demo_catalog
 from kessler.conjunction import screen
 from kessler.mission import (Constraints, MissionState, altitude_shortlist, find_tca,
                              requires_action, synthesize_threat)
@@ -60,7 +61,54 @@ def get_catalog(limit):
     return load_demo_catalog(limit=limit)
 
 
-def sphere(radius, n=48):
+EARTH_TEX = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                         "data", "earth_720x360.npy")
+
+# Object classes, coloured the way trackers label them.
+CLASS_STYLE = {
+    "payload":     ("#5BE8A8", 2.2, 0.95),
+    "rocket_body": ("#F2C14E", 1.9, 0.80),
+    "debris":      ("#FF6B7A", 1.5, 0.55),
+}
+
+# Earth surface: ocean -> land -> ice, driven by the Blue Marble luminance map.
+EARTH_SCALE = [
+    [0.00, "#050B1A"], [0.18, "#0A1E3C"], [0.34, "#0E3355"],
+    [0.46, "#14503F"], [0.58, "#2E6B3A"], [0.70, "#6E7A3C"],
+    [0.82, "#A08B54"], [0.92, "#CFC2A0"], [1.00, "#FFFFFF"],
+]
+
+
+@st.cache_data(show_spinner=False)
+def _earth_tex():
+    return np.load(EARTH_TEX).astype(np.float32) if os.path.exists(EARTH_TEX) else None
+
+
+def earth_surface(gast_hours: float, n_lon: int = 200, n_lat: int = 100):
+    """Sphere mesh plus a Blue Marble luminance field for surfacecolor.
+
+    Everything else in this app lives in TEME, which is inertial -- the Earth
+    turns underneath it. Drawing the texture at fixed longitudes would park the
+    continents in the wrong place relative to every satellite on screen, so the
+    map is rotated by Greenwich apparent sidereal time.
+    """
+    tex = _earth_tex()
+    lon = np.linspace(-np.pi, np.pi, n_lon)
+    lat = np.linspace(-np.pi / 2, np.pi / 2, n_lat)
+    LON, LAT = np.meshgrid(lon, lat)
+    x = R_EARTH * np.cos(LAT) * np.cos(LON)
+    y = R_EARTH * np.cos(LAT) * np.sin(LON)
+    z = R_EARTH * np.sin(LAT)
+    if tex is None:
+        return x, y, z, 0.35 + 0.3 * np.cos(LAT)
+    geo_lon = LON - np.radians(gast_hours * 15.0)          # TEME -> geographic
+    geo_lon = (geo_lon + np.pi) % (2 * np.pi) - np.pi
+    ti = ((geo_lon + np.pi) / (2 * np.pi) * (tex.shape[1] - 1)).astype(int)
+    tj = ((np.pi / 2 - LAT) / np.pi * (tex.shape[0] - 1)).astype(int)
+    return x, y, z, tex[tj, ti]
+
+
+def sphere(radius, n=40):
     u = np.linspace(0, 2 * np.pi, n)
     v = np.linspace(0, np.pi, n // 2)
     return (radius * np.outer(np.cos(u), np.sin(v)),
@@ -68,40 +116,151 @@ def sphere(radius, n=48):
             radius * np.outer(np.ones_like(u), np.cos(v)))
 
 
-def leo_cloud(objects, t_grid, max_points=4000):
+@st.cache_data(show_spinner=False)
+def starfield(n=520, radius=7800.0, seed=4):
+    rng = np.random.default_rng(seed)
+    v = rng.normal(size=(n, 3))
+    v /= np.linalg.norm(v, axis=1, keepdims=True)
+    return v * radius
+
+
+def leo_cloud(objects, t_grid, max_points=5200):
+    """Catalog snapshot split by object class, trimmed to the LEO view."""
     pts = teme_positions_many(objects, t_grid)[:, 0, :]
-    pts = pts[~np.isnan(pts[:, 0])]
-    pts = pts[np.linalg.norm(pts, axis=1) < LEO_VIEW_KM]
+    ok = ~np.isnan(pts[:, 0])
+    pts, objs = pts[ok], [o for o, k in zip(objects, ok) if k]
+    r = np.linalg.norm(pts, axis=1)
+    keep = r < LEO_VIEW_KM
+    pts, objs = pts[keep], [o for o, k in zip(objs, keep) if k]
     if len(pts) > max_points:
-        pts = pts[np.linspace(0, len(pts) - 1, max_points).astype(int)]
-    return pts
+        idx = np.linspace(0, len(pts) - 1, max_points).astype(int)
+        pts, objs = pts[idx], [objs[i] for i in idx]
+    groups = {k: [] for k in CLASS_STYLE}
+    for p, o in zip(pts, objs):
+        groups[classify(o.name)].append(p)
+    return {k: np.array(v) for k, v in groups.items() if len(v)}
 
 
-def globe_figure(cloud=None, tracks=(), markers=(), height=520):
+def globe_figure(cloud=None, tracks=(), markers=(), height=700, show_stars=True,
+                 gast_hours: float = 0.0):
     fig = go.Figure()
-    x, y, z = sphere(R_EARTH)
-    fig.add_surface(x=x, y=y, z=z, showscale=False, opacity=1.0, hoverinfo="skip",
-                    colorscale=[[0, "#0A1122"], [1, "#16233C"]],
-                    lighting=dict(ambient=.75, diffuse=.4, specular=.05))
-    if cloud is not None and len(cloud):
-        fig.add_scatter3d(x=cloud[:, 0], y=cloud[:, 1], z=cloud[:, 2], mode="markers",
-                          marker=dict(size=1.4, color=MUTED, opacity=.5),
-                          name="catalog", hoverinfo="skip")
+
+    # --- atmosphere: two translucent shells for a limb glow ---
+    for scale, op, col in ((1.055, 0.055, "#7FD4FF"), (1.020, 0.085, "#4FA8E8")):
+        sx, sy, sz = sphere(R_EARTH * scale, 34)
+        fig.add_surface(x=sx, y=sy, z=sz, showscale=False, opacity=op, hoverinfo="skip",
+                        colorscale=[[0, col], [1, col]], lighting=dict(ambient=1.0, diffuse=0))
+
+    # --- Earth ---
+    ex, ey, ez, shade = earth_surface(gast_hours)
+    fig.add_surface(x=ex, y=ey, z=ez, surfacecolor=shade, colorscale=EARTH_SCALE,
+                    showscale=False, hoverinfo="skip", cmin=0.0, cmax=1.0,
+                    lighting=dict(ambient=0.62, diffuse=0.85, specular=0.12, roughness=0.92),
+                    lightposition=dict(x=1.6e4, y=1.1e4, z=8e3))
+
+    if show_stars:
+        st_pts = starfield()
+        fig.add_scatter3d(x=st_pts[:, 0], y=st_pts[:, 1], z=st_pts[:, 2], mode="markers",
+                          marker=dict(size=1.1, color="#8FA5C8", opacity=.55),
+                          hoverinfo="skip", showlegend=False)
+
+    if cloud:
+        labels = {"payload": "Payload", "rocket_body": "Rocket body", "debris": "Debris"}
+        for cls, pts in cloud.items():
+            col, size, op = CLASS_STYLE[cls]
+            fig.add_scatter3d(
+                x=pts[:, 0], y=pts[:, 1], z=pts[:, 2], mode="markers",
+                marker=dict(size=size, color=col, opacity=op,
+                            line=dict(width=0)),
+                name=f"{labels[cls]} ({len(pts):,})", hoverinfo="skip")
+
     for pts, color, name, width in tracks:
         fig.add_scatter3d(x=pts[0], y=pts[1], z=pts[2], mode="lines",
-                          line=dict(color=color, width=width), name=name)
+                          line=dict(color=color, width=width), name=name, hoverinfo="skip")
     for p, color, name in markers:
         fig.add_scatter3d(x=[p[0]], y=[p[1]], z=[p[2]], mode="markers",
-                          marker=dict(size=6, color=color, symbol="diamond"), name=name)
+                          marker=dict(size=7, color=color, symbol="diamond",
+                                      line=dict(color="#FFFFFF", width=1)),
+                          name=name, hoverinfo="skip")
+
     fig.update_layout(
-        height=height, margin=dict(l=0, r=0, t=0, b=0), paper_bgcolor=VOID, showlegend=True,
-        legend=dict(bgcolor="rgba(0,0,0,0)", font=dict(color=MUTED, size=10),
-                    orientation="h", y=1.02, x=0),
+        height=height, margin=dict(l=0, r=0, t=0, b=0),
+        paper_bgcolor=VOID, showlegend=True,
+        legend=dict(bgcolor="rgba(6,9,17,.55)", bordercolor=LINE, borderwidth=1,
+                    font=dict(color=INK, size=11, family="monospace"),
+                    orientation="h", y=1.04, x=0, itemsizing="constant"),
         scene=dict(bgcolor=VOID, aspectmode="cube",
                    xaxis=dict(visible=False, range=[-LEO_VIEW_KM, LEO_VIEW_KM]),
                    yaxis=dict(visible=False, range=[-LEO_VIEW_KM, LEO_VIEW_KM]),
                    zaxis=dict(visible=False, range=[-LEO_VIEW_KM, LEO_VIEW_KM]),
-                   camera=dict(eye=dict(x=1.15, y=1.15, z=.75))))
+                   camera=dict(eye=dict(x=1.05, y=1.05, z=.62),
+                               up=dict(x=0, y=0, z=1))))
+    return fig
+
+
+def encounter_figure(r0, v0, r_burn, v_post, tr, tv, tca_offset_s, burn_offset_s,
+                     miss_before, miss_after, rel_speed_kms, height=460):
+    """The encounter in the satellite's own frame -- the standard conjunction view.
+
+    Plotted is the debris' position relative to the satellite, so the origin IS
+    the satellite and the closest approach is where each curve comes nearest the
+    origin. Two curves: the original trajectory and the post-burn one. At
+    11 km/s of closing speed the whole encounter is over in about a second, so
+    the window is sized from the relative velocity rather than fixed.
+    """
+    rel_speed = max(float(rel_speed_kms), 0.1)
+    window_s = float(np.clip(8.0 * max(miss_after, 0.5) / rel_speed, 0.6, 30.0))
+    half = window_s / 2.0
+    dt = window_s / 400.0
+
+    def arc(rr, vv, lead):
+        _, a, b = propagate(rr, vv, max(lead, 0.0), dt_s=max(lead / 200.0, 0.05)) \
+            if lead > 0 else (None, rr[:, None], vv[:, None])
+        _, arr, _ = propagate(a[:, -1], b[:, -1], window_s, dt_s=dt)
+        return arr
+
+    hero_o = arc(r0, v0, tca_offset_s - half)
+    threat = arc(tr, tv, tca_offset_s - half)
+    hero_p = arc(r_burn, v_post, tca_offset_s - burn_offset_s - half)
+    n = min(hero_o.shape[1], threat.shape[1], hero_p.shape[1])
+
+    rel_o = threat[:, :n] - hero_o[:, :n]      # debris seen from the satellite
+    rel_p = threat[:, :n] - hero_p[:, :n]
+
+    fig = go.Figure()
+    fig.add_scatter3d(x=rel_o[0], y=rel_o[1], z=rel_o[2], mode="lines",
+                      line=dict(color=ALERT, width=6),
+                      name=f"Debris — original path ({miss_before:.3f} km)", hoverinfo="skip")
+    fig.add_scatter3d(x=rel_p[0], y=rel_p[1], z=rel_p[2], mode="lines",
+                      line=dict(color=NOMINAL, width=6),
+                      name=f"Debris — after the burn ({miss_after:.2f} km)", hoverinfo="skip")
+
+    for arr, col in ((rel_o, ALERT), (rel_p, NOMINAL)):
+        k = int(np.argmin(np.linalg.norm(arr, axis=0)))
+        fig.add_scatter3d(x=[0, arr[0, k]], y=[0, arr[1, k]], z=[0, arr[2, k]],
+                          mode="lines", line=dict(color=col, width=3, dash="dash"),
+                          showlegend=False, hoverinfo="skip")
+        fig.add_scatter3d(x=[arr[0, k]], y=[arr[1, k]], z=[arr[2, k]], mode="markers",
+                          marker=dict(size=6, color=col), showlegend=False, hoverinfo="skip")
+
+    fig.add_scatter3d(x=[0], y=[0], z=[0], mode="markers",
+                      marker=dict(size=11, color=ICE, symbol="diamond",
+                                  line=dict(color="#FFFFFF", width=2)),
+                      name="Satellite", hoverinfo="skip")
+
+    span = max(miss_after * 1.9, miss_before * 3.0, 1.0)
+    ax = dict(showbackground=False, gridcolor="#1B2740", zerolinecolor="#2C3E5C",
+              color=MUTED, ticks="", range=[-span, span], nticks=5)
+    fig.update_layout(
+        height=height, margin=dict(l=0, r=0, t=0, b=0), paper_bgcolor=VOID,
+        legend=dict(bgcolor="rgba(6,9,17,.6)", bordercolor=LINE, borderwidth=1,
+                    font=dict(color=INK, size=11, family="monospace"),
+                    orientation="h", y=1.07, x=0),
+        scene=dict(bgcolor=VOID, aspectmode="cube",
+                   xaxis=dict(**ax, title=dict(text="km", font=dict(size=10, color=MUTED))),
+                   yaxis=dict(**ax, title=dict(text="km", font=dict(size=10, color=MUTED))),
+                   zaxis=dict(**ax, title=dict(text="km", font=dict(size=10, color=MUTED))),
+                   camera=dict(eye=dict(x=1.35, y=1.35, z=.95))))
     return fig
 
 
@@ -128,8 +287,9 @@ def build_state(hero, r0, v0, tname, tr, tv, t0, el, constraints):
                         constraints=constraints)
 
 
-def alert_dict(hero, tname, enc):
-    return {"primary": hero.name, "secondary": tname,
+def alert_dict(hero, tname, enc, tr=None, tv=None):
+    return {"_tr": tr, "_tv": tv,
+            "primary": hero.name, "secondary": tname,
             "tca_offset_s": enc["tca_offset_s"], "miss_km": round(enc["miss_km"], 4),
             "rel_speed_kms": round(enc["rel_speed_kms"], 3), "pc": enc["pc"],
             "radial_km": round(enc.get("radial_km", 0), 3),
@@ -138,7 +298,7 @@ def alert_dict(hero, tname, enc):
 
 
 def show_result(out, alert, plot_slot, metric_slot, r0, v0, horizon, cloud,
-                hero_pre, threat_tr, tca_point, hero_name, tname, elapsed):
+                hero_pre, threat_tr, tca_point, hero_name, tname, elapsed, gast=0.0):
     if not out["approved"]:
         st.error("No safe maneuver inside the constraint set — escalated to a human operator.")
         return
@@ -149,9 +309,10 @@ def show_result(out, alert, plot_slot, metric_slot, r0, v0, horizon, cloud,
     _, hero_post, _ = propagate(rb[:, -1], v_post, horizon - p["burn_offset_s"], dt_s=15.0)
     plot_slot.plotly_chart(globe_figure(
         cloud,
-        [(hero_pre, LINE, "original path", 2), (threat_tr, ALERT, tname, 3),
-         (hero_post, NOMINAL, f"{hero_name} (post-burn)", 5)],
-        [(tca_point, ALERT, "TCA"), (rb[:, -1], AMBER, "burn")]), use_container_width=True)
+        [(hero_pre, LINE, "original path", 3), (threat_tr, ALERT, tname, 4),
+         (hero_post, NOMINAL, f"{hero_name} (post-burn)", 7)],
+        [(tca_point, ALERT, "TCA"), (rb[:, -1], AMBER, "burn")],
+        gast_hours=float(gast)), use_container_width=True)
     with metric_slot:
         m = st.columns(5)
         m[0].metric("Miss distance", f"{res['new_miss_km']:.2f} km",
@@ -161,7 +322,14 @@ def show_result(out, alert, plot_slot, metric_slot, r0, v0, horizon, cloud,
         m[3].metric("Agent rounds", out["rounds"])
         m[4].metric("Loop time", f"{elapsed:.1f} s")
     st.success(f"BURN APPROVED AND ISSUED — {hero_name} clears {tname} by "
-               f"{res['new_miss_km']:.2f} km. No human in the loop.")
+               f"{res['new_miss_km']:.2f} km.")
+    st.markdown("<div class='kessler-hd'>Encounter close-up — the debris seen from "
+                "the satellite. Origin is the spacecraft.</div>", unsafe_allow_html=True)
+    st.plotly_chart(encounter_figure(
+        r0, v0, rb[:, -1], v_post, alert["_tr"], alert["_tv"],
+        alert["tca_offset_s"], p["burn_offset_s"],
+        alert["miss_km"], res["new_miss_km"], alert["rel_speed_kms"]),
+        use_container_width=True)
 
 
 def render_leolabs(view: str, height: int = 560):
@@ -385,7 +553,9 @@ if not run and not rr:
     grid = ts.tt_jd(t0.tt + np.zeros(1))
     _, hp, _ = propagate(r0, v0, el["period_min"] * 60, dt_s=20.0)
     plot_slot.plotly_chart(globe_figure(leo_cloud(cat.objects, grid),
-                                        [(hp, ICE, hero.name, 3)]), use_container_width=True)
+                                        [(hp, ICE, hero.name, 4)],
+                                        gast_hours=float(t0.gast)),
+                           use_container_width=True)
     render_log([], (), alert_slot, "Idle — press RUN AVOIDANCE.")
     render_log([], (), agent_slot, "Agents standing by.")
     render_engagement_log()
@@ -441,9 +611,9 @@ if run:
     if not cc.consistent:
         bus.emit("error", "Propagators disagree beyond tolerance — geometry not trustworthy.")
 
+    geom = {k: v for k, v in alert_dict(hero, tname, enc).items() if not k.startswith("_")}
     eng = elog.open(primary=hero.name, secondary=tname, seeded=(mode == "Seeded threat"),
-                    geometry=alert_dict(hero, tname, enc), consensus=cc.as_dict(),
-                    mode=op_mode)
+                    geometry=geom, consensus=cc.as_dict(), mode=op_mode)
 
     horizon = enc["tca_offset_s"] * 1.15
     _, hero_pre, _ = propagate(r0, v0, horizon, dt_s=15.0)
@@ -459,7 +629,8 @@ if run:
         bus.emit("alert", f"ACTION REQUIRED — {why}")
         state = build_state(hero, r0, v0, tname, tr, tv, t0, el, c)
         out = run_resolution(state, altitude_shortlist(cat.objects, el, 50.0),
-                             alert_dict(hero, tname, enc), bus)
+                             {k: v for k, v in alert_dict(hero, tname, enc).items()
+                              if not k.startswith("_")}, bus)
         eng.proposal = out.get("proposal")
         eng.engine_verdict = out.get("result")
         eng.agent_rounds = out.get("rounds", 0)
@@ -477,7 +648,7 @@ if run:
         eng_id=eng.engagement_id, events=events, enc=enc, out=out, cc=cc,
         r0=r0, v0=v0, horizon=horizon, cloud=cloud, hero_pre=hero_pre,
         threat_tr=threat_tr, tca_point=tca_point, hero_name=hero.name, tname=tname,
-        alert=alert_dict(hero, tname, enc), elapsed=time.time() - t_run,
+        alert=alert_dict(hero, tname, enc, tr=tr, tv=tv), elapsed=time.time() - t_run,
         action=act, why=why)
     rr = st.session_state["run_result"]
 
@@ -491,9 +662,10 @@ eng = next(e for e in elog.entries if e.engagement_id == rr["eng_id"])
 
 plot_slot.plotly_chart(globe_figure(
     rr["cloud"],
-    [(rr["hero_pre"], ICE, f"{rr['hero_name']} (current)", 4),
-     (rr["threat_tr"], ALERT, rr["tname"], 3)],
-    [(rr["tca_point"], ALERT, "TCA")]), use_container_width=True)
+    [(rr["hero_pre"], ICE, f"{rr['hero_name']} (current)", 5),
+     (rr["threat_tr"], ALERT, rr["tname"], 4)],
+    [(rr["tca_point"], ALERT, "TCA")],
+    gast_hours=float(t0.gast)), use_container_width=True)
 
 # ---- the gate: detection is not the same as needing to maneuver ----
 if not rr["action"]:
@@ -549,7 +721,7 @@ if eng.authorization == Authorization.HALTED.value:
 
 show_result(out, rr["alert"], plot_slot, metric_slot, rr["r0"], rr["v0"], rr["horizon"],
             rr["cloud"], rr["hero_pre"], rr["threat_tr"], rr["tca_point"],
-            rr["hero_name"], rr["tname"], rr["elapsed"])
+            rr["hero_name"], rr["tname"], rr["elapsed"], gast=float(t0.gast))
 st.caption(f"Engagement {eng.engagement_id} · authorization {eng.authorization} "
            f"by {eng.authorized_by} · consensus {cc.residual_km*1000:.0f} m · "
            f"uplink {eng.uplink}")

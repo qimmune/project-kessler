@@ -9,12 +9,22 @@ from skyfield.api import load, EarthSatellite
 
 DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
 
+_GP = "https://celestrak.org/NORAD/elements/gp.php?GROUP={}&FORMAT=tle"
+
 GROUPS = {
-    "active":   "https://celestrak.org/NORAD/elements/gp.php?GROUP=active&FORMAT=tle",
-    "starlink": "https://celestrak.org/NORAD/elements/gp.php?GROUP=starlink&FORMAT=tle",
-    "debris":   "https://celestrak.org/NORAD/elements/gp.php?GROUP=cosmos-1408-debris&FORMAT=tle",
-    "iridium":  "https://celestrak.org/NORAD/elements/gp.php?GROUP=iridium-33-debris&FORMAT=tle",
+    "active":            _GP.format("active"),
+    "starlink":          _GP.format("starlink"),
+    # The four big fragmentation events. "active" contains payloads only, so
+    # without these the sky looks deceptively clean -- debris is most of the
+    # actual population and all of the actual hazard.
+    "cosmos-1408-debris": _GP.format("cosmos-1408-debris"),
+    "fengyun-1c-debris":  _GP.format("fengyun-1c-debris"),
+    "iridium-33-debris":  _GP.format("iridium-33-debris"),
+    "cosmos-2251-debris": _GP.format("cosmos-2251-debris"),
 }
+
+DEBRIS_GROUPS = ("cosmos-1408-debris", "fengyun-1c-debris",
+                 "iridium-33-debris", "cosmos-2251-debris")
 
 MAX_CACHE_AGE_S = 12 * 3600
 
@@ -34,6 +44,20 @@ class Catalog:
             if needle in s.name.upper():
                 return s
         return None
+
+
+def classify(name: str) -> str:
+    """Object class from the catalog name, the way trackers label them.
+
+    CelesTrak encodes it in the name: "DEB" for fragmentation debris, "R/B" for
+    spent rocket bodies, everything else is an active or defunct payload.
+    """
+    n = name.upper()
+    if " DEB" in n or n.endswith("DEB") or "DEBRIS" in n:
+        return "debris"
+    if "R/B" in n or "ROCKET BODY" in n:
+        return "rocket_body"
+    return "payload"
 
 
 def _cache_path(group: str) -> str:
@@ -67,6 +91,27 @@ def load_group(group: str = "active", reload: bool = False) -> Catalog:
     return Catalog(objects=sats, source=source, fetched_at=os.path.getmtime(path))
 
 
+def load_full_catalog(reload: bool = False, include_debris: bool = True) -> Catalog:
+    """Active payloads plus the major debris clouds, de-duplicated by NORAD id."""
+    cat = load_group("active", reload=reload)
+    objs = list(cat.objects)
+    seen = {s.model.satnum for s in objs}
+    sources = [cat.source]
+    if include_debris:
+        for g in DEBRIS_GROUPS:
+            try:
+                extra = load_group(g, reload=reload)
+            except Exception:
+                continue
+            for s in extra.objects:
+                if s.model.satnum not in seen:
+                    seen.add(s.model.satnum)
+                    objs.append(s)
+            sources.append(g)
+    return Catalog(objects=objs, source=" + ".join(sources[:1] + [f"{len(sources)-1} debris sets"]),
+                   fetched_at=cat.fetched_at)
+
+
 def load_demo_catalog(limit: int | None = 2500, reload: bool = False) -> Catalog:
     """The catalog the demo screens against.
 
@@ -75,7 +120,7 @@ def load_demo_catalog(limit: int | None = 2500, reload: bool = False) -> Catalog
     correctness one -- raise it to the full catalog for the 'we held it all in
     memory' story.
     """
-    cat = load_group("active", reload=reload)
+    cat = load_full_catalog(reload=reload)
     objs = cat.objects if limit is None else cat.objects[:limit]
     return Catalog(objects=objs, source=cat.source, fetched_at=cat.fetched_at)
 
