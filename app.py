@@ -261,7 +261,12 @@ t0 = ts.now()
 
 with st.expander("Advanced", expanded=False):
     a = st.columns(4)
-    fleet_n = a[0].slider("Assets protected", 4, 30, 12)
+    fleet_n = a[0].slider(
+        "Assets protected", 4, 500, 12, step=4,
+        help="How many of our own satellites get screened. A real operator "
+             "watches their whole constellation; this is the knob you turn up "
+             "on bigger hardware. 300 assets is about 2 billion position "
+             "calculations — seconds on a GPU, roughly half a minute on CPU.")
     env_n = st.select_slider(
         "Modeled debris environment (sample size)",
         [0, 15000, 30000, 45000, 70000, 100000], value=45000,
@@ -437,9 +442,11 @@ k[1].metric("States evaluated", f"{trade['states_evaluated']/1e6:.0f} M")
 k[2].metric("Resident tensor", f"{trade['tensor_gb']:.2f} GB")
 k[3].metric("Compute time", f"{trade['elapsed_s']:.1f} s")
 k[4].metric("Feasible", f"{len(feasible)}/{trade['scenarios']}")
-st.caption(f"{trade['scenarios']} strategies × {trade['passes']} calibration passes, "
-           f"each re-propagated and screened against {trade['screened_objects']:,} objects "
-           f"over {trade['epochs']:,} epochs · backend {trade['backend']} · "
+st.caption(f"{trade['scenarios']} strategies × {trade['passes']} calibration passes. "
+           f"Each option's **new** orbit is re-propagated and screened against "
+           f"{trade['screened_objects']:,} catalogued objects over "
+           f"{trade['epochs']:,} epochs, so a dodge that would cause a different "
+           f"collision is caught before it is offered · backend {trade['backend']} · "
            f"host→device {trade['transfer'].get('bytes', 0)/1e6:.0f} MB")
 
 # ---------------------------------------------------------------- comparison
@@ -457,6 +464,17 @@ for o in options:
         "Verdict": "feasible" if o.feasible else "· ".join(o.failed),
     })
 st.dataframe(rows, use_container_width=True, hide_index=True)
+n_out = len(options) - len(feasible)
+st.caption(
+    f"**{len(feasible)} cleared, {n_out} ruled out.** The ruled-out rows are not "
+    f"padding — they are the search, shown with the number that disqualified them. "
+    f"A plane change holds altitude and timing perfectly but costs about ten times "
+    f"the fuel, so it usually fails the budget; that is *why* the in-track answers "
+    f"win, and an operator should be able to see it rather than take it on trust. "
+    f"Every row here — cleared or not — was flown and then re-screened against "
+    f"{trade['screened_objects']:,} catalogued objects over the following "
+    f"{trade['epochs']:,} epochs to confirm the dodge does not create a new "
+    f"conjunction. That is the *New conjunctions* column.")
 
 st.markdown(f"<p class='kes-lab'>Agent recommendation — {rec.get('recommended','—')}"
             f"</p>", unsafe_allow_html=True)
