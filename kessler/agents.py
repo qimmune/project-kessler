@@ -477,3 +477,116 @@ def recommend_option(options, alert: dict, state, bus) -> dict:
                        f"{runner.miss_km:.2f} km." if runner else "")}
     bus.emit("agent2", f"Recommends {out['recommended']} -- {out['rationale']}")
     return out
+
+
+# ----------------------------------------------------------------------
+# agentic review of a costed trade space
+# ----------------------------------------------------------------------
+REVIEW_SYSTEM = """You are the Mission Assurance Director. The physics engine has
+generated and costed several avoidance maneuvers for an imminent conjunction.
+Your job is to decide which one flies.
+
+You have the simulate_maneuver tool. Use it. The generated family spans the
+obvious strategies, but it is not exhaustive, and you should not accept it as
+the whole trade space:
+
+  - If an option looks marginal -- clearance barely above the minimum, or fuel
+    close to the ceiling -- probe a variant and see whether a small change buys
+    a materially better outcome.
+  - If you suspect a cheaper burn exists between two generated options, simulate
+    it rather than speculating.
+  - In-track separation accumulates as roughly 3 * delta_v * time-to-closest-
+    approach, so igniting earlier is usually cheaper than burning harder. Test
+    that if the generated set does not already cover it.
+
+Every number you rely on must come from the tool. Do not estimate an outcome you
+could have measured. When you are done, reply with ONLY a JSON object:
+{"recommended": "<option label, or the label of a variant you simulated>",
+ "rationale": "two sentences naming the numbers that decided it",
+ "runner_up": "<label>", "why_not": "one sentence",
+ "probed": "what you tested beyond the generated set, or 'nothing'"}"""
+
+
+def review_trade_space(state, catalog_objects, options, alert: dict, bus,
+                       max_turns: int = 4) -> dict:
+    """Let the critic interrogate the costed options through the physics engine.
+
+    This is the agentic half of the loop: the engine does the wide search, the
+    agent decides what deserves a closer look and pays for that look in real
+    simulations rather than assertions.
+    """
+    from .mission import evaluate_maneuver
+
+    feasible = [o for o in options if o.feasible]
+    if not feasible:
+        bus.emit("error", "No feasible option in the trade space -- escalating.")
+        return {"recommended": None, "rationale": "no option satisfies the constraints"}
+
+    client = _client()
+    backend, model = resolve_backend()
+    if client is None:
+        return recommend_option(options, alert, state, bus)
+
+    bus.emit("status", f"Mission Assurance review -- {backend} ({model}), "
+                       f"tool access to the physics engine")
+
+    extra: list = []
+
+    def run_tool(args: dict) -> dict:
+        res = evaluate_maneuver(state, catalog_objects, args["direction_ric"],
+                                float(args["delta_v_mps"]),
+                                float(args["burn_offset_s"]),
+                                float(alert["tca_offset_s"]))
+        if res.get("valid"):
+            label = (f"Agent variant {len(extra)+1}: "
+                     f"{args['delta_v_mps']:.3f} m/s at "
+                     f"T+{float(args['burn_offset_s'])/60:.0f} min")
+            bus.emit("tool", f"{label} -> miss {res['new_miss_km']:.3f} km, "
+                             f"Pc {res['new_pc']:.1e}, "
+                             f"{'clears' if res['approved'] else 'fails ' + ','.join(res['failed_checks'])}")
+            extra.append({"label": label, "args": args, "result": res})
+        else:
+            bus.emit("tool", f"Rejected input: {res.get('error')}")
+        return res
+
+    payload = {
+        "conjunction": alert,
+        "constraints": {"separation_minimum_km": state.constraints.min_miss_km,
+                        "delta_v_budget_mps": state.constraints.dv_budget_mps,
+                        "altitude_box_km": state.constraints.altitude_box_km},
+        "generated_options": [{
+            "label": o.label, "strategy": o.strategy, "feasible": o.feasible,
+            "direction_ric": o.direction_ric, "miss_km": o.miss_km,
+            "delta_v_mps": o.delta_v_mps, "burn_offset_s": o.burn_offset_s,
+            "altitude_drift_km": o.altitude_drift_km,
+            "new_conjunctions": o.secondary_count,
+        } for o in options],
+    }
+    messages = [{"role": "user", "content": json.dumps(payload, indent=2)}]
+
+    msg = None
+    for _ in range(max_turns):
+        msg = client.messages.create(model=model, max_tokens=1100,
+                                     system=REVIEW_SYSTEM, tools=[SIMULATE_TOOL],
+                                     messages=messages)
+        calls = [b for b in msg.content if b.type == "tool_use"]
+        if not calls:
+            break
+        messages.append({"role": "assistant", "content": msg.content})
+        messages.append({"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": c.id,
+             "content": json.dumps(run_tool(c.input))} for c in calls]})
+
+    raw = "".join(b.text for b in (msg.content if msg else []) if b.type == "text")
+    out = _extract_json(raw) or {}
+    labels = {o.label for o in feasible} | {e["label"] for e in extra}
+    if out.get("recommended") not in labels:
+        bus.emit("error", "Review returned an unusable choice; falling back to the rule.")
+        return recommend_option(options, alert, state, bus)
+
+    out["variants"] = extra
+    out["tool_calls"] = len(extra)
+    bus.emit("agent2", f"Recommends {out['recommended']} -- {out.get('rationale','')}")
+    if out.get("probed") and out["probed"].lower() != "nothing":
+        bus.emit("agent1", f"Probed beyond the generated set: {out['probed']}")
+    return out

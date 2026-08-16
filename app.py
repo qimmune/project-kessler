@@ -12,7 +12,7 @@ import numpy as np
 import plotly.graph_objects as go
 import streamlit as st
 
-from kessler.agents import recommend_option, run_resolution
+from kessler.agents import recommend_option, review_trade_space
 from kessler.assurance import EngagementLog, Mode, cross_check
 from kessler.bus import Bus, Event
 from kessler.catalog import classify, load_demo_catalog
@@ -20,7 +20,7 @@ from kessler.environment import TOTAL_OVER_1MM, sample_environment
 from kessler.mission import (Constraints, MissionState, altitude_shortlist, find_tca,
                              requires_action, synthesize_threat)
 from kessler.monitor import select_fleet, sweep_fleet
-from kessler.options import solve_options
+from kessler.options import Option, _characterize as _recharacterize, solve_options
 from kessler.physics import (R_EARTH, apply_burn, elements, propagate,
                              teme_positions_many, teme_state, timescale)
 
@@ -31,7 +31,7 @@ LEO_VIEW_KM = 8200.0
 # Bumped whenever the shape of st.session_state["done"] changes. Streamlit keeps
 # session state across hot-reloads, so without this a dict written by an older
 # build survives into new code and blows up on a key that did not exist yet.
-STATE_SCHEMA = 3
+STATE_SCHEMA = 4
 EARTH_TEX = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                          "data", "earth_720x360.npy")
 
@@ -368,7 +368,32 @@ if engage:
                        f"on {trade['backend']}")
     n_ok = sum(1 for o in trade["options"] if o.feasible)
     bus.emit("status", f"{n_ok} of {trade['scenarios']} options satisfy every constraint")
-    rec = recommend_option(trade["options"], alert, state, bus)
+    rec = review_trade_space(state, altitude_shortlist(cat.objects, el, 50.0),
+                             trade["options"], alert, bus)
+
+    # The critic can simulate burns the generator never proposed. Anything it
+    # found that clears becomes a selectable option, marked as the agent's own.
+    for v in rec.get("variants", []):
+        res, args = v["result"], v["args"]
+        if not res.get("approved"):
+            continue
+        d_ric = [float(x) for x in args["direction_ric"]]
+        trade["options"].append(Option(
+            label=v["label"], strategy="proposed by the agent",
+            direction_ric=d_ric, delta_v_mps=float(args["delta_v_mps"]),
+            burn_offset_s=float(args["burn_offset_s"]),
+            miss_km=float(res["new_miss_km"]), pc=float(res["new_pc"]),
+            altitude_drift_km=float(res["altitude_drift_km"]),
+            secondary_count=len(res.get("secondary_conjunctions", [])),
+            fuel_pct_of_budget=round(100.0 * float(args["delta_v_mps"])
+                                     / c.dv_budget_mps, 1),
+            decision_time_s=float(args["burn_offset_s"]), feasible=True,
+            pros=["Found by the agent, not the generated family"],
+            cons=[]))
+    if rec.get("variants"):
+        _recharacterize(trade["options"], c)
+        bus.emit("status", f"Agent added {len(rec['variants'])} simulated variant(s) "
+                           f"to the trade space")
 
     st.session_state["done"] = dict(
         schema=STATE_SCHEMA, env_n=env_n, trade=trade, rec=rec, state=state,
